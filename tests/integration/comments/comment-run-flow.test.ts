@@ -541,7 +541,7 @@ function codexRunWithProgress(threadId: string, progress: string, finalAnswer: s
       input: { command: 'lark-cli docs +fetch --api-version v2 --doc doc-token --doc-format markdown' },
     },
     { type: 'tool_result', id: `${threadId}-tool`, output: 'doc body', isError: false },
-    { type: 'text', delta: finalAnswer },
+    { type: 'final_text', content: finalAnswer },
     { type: 'done', threadId, terminationReason: 'normal' },
   ];
 }

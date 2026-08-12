@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { CommentEvent, LarkChannel } from '@larksuite/channel';
-import { claudeCapability, codexCapability } from '../agent/capability';
+import { capabilityForProfile } from '../agent/capability';
 import type { AgentAdapter, AgentEvent } from '../agent/types';
 import { getAgentStopGraceMs } from '../config/schema';
 import type { Controls } from '../commands';
@@ -116,6 +116,23 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
     log.info('comment', 'skip', { reason: 'unsupported-target', commentScopeId: eventCommentScopeId });
     return;
   }
+  // The organization-wide Kimi pilot is intentionally limited to explicitly
+  // allowlisted IM/topic chats. Document comments can include collaborators
+  // outside those chats and currently bypass the normal chat/user allowlists,
+  // so keep this surface closed until tenant membership checks are available.
+  if (controls.profileConfig.agentKind === 'kimi') {
+    log.info('comment', 'skip', { reason: 'kimi-comment-surface-disabled' });
+    await postCommentReply(
+      channel,
+      target,
+      evt,
+      'Kimi 试点暂只支持已授权群聊中的 @消息，暂不处理云文档评论。',
+      { isWhole: false },
+    ).catch((err) => {
+      log.fail('comment', err, { step: 'postKimiSurfaceDisabledReply' });
+    });
+    return;
+  }
   const targetDocScopeId = commentDocumentScopeId(target.fileToken);
   const commentThreadScopeId = eventCommentScopeId;
   const runScopeId = commentExecutionScopeId(commentThreadScopeId);
@@ -181,10 +198,7 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
     : false;
 
   try {
-    const capability =
-      controls.profileConfig.agentKind === 'codex'
-        ? codexCapability(controls.profileConfig)
-        : claudeCapability(controls.profileConfig);
+    const capability = capabilityForProfile(controls.profileConfig);
     const runTimeoutMs = commentRunTimeoutMs(sessions, runScopeId);
     const threadTimeoutMs = commentRunTimeoutMs(sessions, commentThreadScopeId);
     const commentTimeoutMs = runTimeoutMs !== undefined ? runTimeoutMs : threadTimeoutMs;
@@ -238,8 +252,10 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
           })
         : undefined;
       const sessionId =
-        canResumeAgentSession && capability.agentId === 'claude'
-          ? sessions.resumeFor(docSessionScopeId, cwdRealpath) ??
+        canResumeAgentSession &&
+        (capability.agentId === 'claude' || capability.agentId === 'kimi')
+          ? catalogEntry?.sessionId ??
+            sessions.resumeFor(docSessionScopeId, cwdRealpath) ??
             sessions.resumeFor(legacyDocSessionScopeId, cwdRealpath)
           : undefined;
       const threadId = capability.agentId === 'codex' ? catalogEntry?.threadId : undefined;
@@ -256,6 +272,14 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
         policy,
         sessionId,
         threadId,
+        model: sessions.getModel(docSessionScopeId) ?? sessions.getModel(legacyDocSessionScopeId),
+        reasoningEffort:
+          capability.agentId === 'codex'
+            ? (
+                sessions.getReasoningEffort(docSessionScopeId) ??
+                sessions.getReasoningEffort(legacyDocSessionScopeId)
+              )
+            : undefined,
         stopGraceMs: getAgentStopGraceMs(controls.cfg),
         observability: {
           profile: controls.profile,
@@ -323,12 +347,19 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
             policy,
             event: e,
           });
-          if (capability.agentId === 'claude' && e.type === 'system' && e.sessionId) {
+          if (
+            (capability.agentId === 'claude' || capability.agentId === 'kimi') &&
+            e.type === 'system' &&
+            e.sessionId
+          ) {
             sessions.set(docSessionScopeId, e.sessionId, policy.cwdRealpath);
           }
           switch (e.type) {
             case 'text':
               answer += e.delta;
+              break;
+            case 'final_text':
+              answer = e.content;
               break;
             case 'tool_use':
             case 'tool_result':

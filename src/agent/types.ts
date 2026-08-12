@@ -5,7 +5,9 @@ export type { ClaudePermissionMode } from '../config/permissions';
 
 export type AgentEvent =
   | { type: 'system'; sessionId?: string; threadId?: string; cwd?: string; model?: string }
+  | { type: 'progress' }
   | { type: 'text'; delta: string }
+  | { type: 'final_text'; content: string }
   | { type: 'thinking'; delta: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
   | { type: 'tool_result'; id: string; output: string; isError: boolean }
@@ -34,6 +36,14 @@ export interface AgentRunOptions {
   sessionId?: string;
   threadId?: string;
   model?: string;
+  reasoningEffort?: string;
+  /**
+   * Extra Codex `-c` config overrides appended verbatim (each element is the
+   * value of one `-c` flag, e.g. `agents.max_concurrent_threads_per_session=2`).
+   * Codex-only; ignored by other adapters. Used by the effort router to set the
+   * per-run sub-agent budget derived from the classified difficulty.
+   */
+  codexConfigOverrides?: readonly string[];
   images?: readonly string[];
   sandbox?: CodexSandboxMode;
   permissionMode?: ClaudePermissionMode;
@@ -50,6 +60,13 @@ export interface AgentRunOptions {
 export interface AgentRun {
   readonly runId: string;
   readonly events: AsyncIterable<AgentEvent>;
+  /**
+   * The direct agent subprocess pid, when the adapter spawns one. Persisted by
+   * the executor so a later bridge instance can reap orphaned children after an
+   * ungraceful restart (SIGKILL / crash). Undefined for adapters without a
+   * single direct child.
+   */
+  readonly pid?: number;
   stop(): Promise<void>;
   /**
    * Wait up to `timeoutMs` for the agent process to exit on its own.

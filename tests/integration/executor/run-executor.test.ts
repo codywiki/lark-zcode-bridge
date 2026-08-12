@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import type { AgentAdapter, AgentRun, AgentRunOptions } from '../../../src/agent/types';
+import type {
+  AgentAdapter,
+  AgentEvent,
+  AgentRun,
+  AgentRunOptions,
+} from '../../../src/agent/types';
 import { ActiveRuns } from '../../../src/bot/active-runs';
 import { ProcessPool } from '../../../src/bot/process-pool';
 import { RunExecutor } from '../../../src/runtime/run-executor';
@@ -264,6 +269,116 @@ describe('RunExecutor', () => {
     expect(h.activeRuns.get('scope-1')).toBeUndefined();
     expect(h.pool.snapshot()).toMatchObject({ active: 0, waiting: 0 });
   });
+
+  it('cancels a run waiting for pool capacity and allows the scope to submit again', async () => {
+    const h = await createHarness({
+      events: [
+        [{ type: 'done', terminationReason: 'normal' }],
+        [{ type: 'done', terminationReason: 'normal' }],
+      ],
+      poolCap: 1,
+    });
+    const first = await h.executor.submit({
+      scopeId: 'scope-1',
+      policy: policy(h.tmp.workspace),
+    });
+    const waiting = h.executor.submit({
+      scopeId: 'scope-2',
+      policy: policy(h.tmp.workspace),
+    });
+
+    expect(h.pool.snapshot()).toMatchObject({ active: 1, waiting: 1 });
+    expect(h.activeRuns.interrupt('scope-2')).toBe(true);
+    await expect(waiting).rejects.toMatchObject({ code: 'run-interrupted' });
+    expect(h.pool.snapshot()).toMatchObject({ active: 1, waiting: 0 });
+    expect(h.agent.runs).toHaveLength(1);
+
+    await collect(first.subscribe());
+    const retried = await h.executor.submit({
+      scopeId: 'scope-2',
+      policy: policy(h.tmp.workspace),
+    });
+    await collect(retried.subscribe());
+    expect(h.agent.runs).toHaveLength(2);
+  });
+
+  it('does not spawn when stopped while prepareRun is pending', async () => {
+    const agent = new DelayedPrepareAgent({
+      events: [{ type: 'done', terminationReason: 'normal' }],
+    });
+    const h = await createHarness({ agent });
+    const submit = h.executor.submit({
+      scopeId: 'scope-prepare',
+      policy: policy(h.tmp.workspace),
+    });
+    await agent.prepareStarted;
+
+    expect(h.activeRuns.interrupt('scope-prepare')).toBe(true);
+    agent.releasePrepare();
+
+    await expect(submit).rejects.toMatchObject({ code: 'run-interrupted' });
+    expect(agent.runs).toHaveLength(0);
+    expect(h.pool.snapshot()).toMatchObject({ active: 0, waiting: 0 });
+  });
+
+  it('forces subscribers and cleanup to finish even when the source never reaches EOF', async () => {
+    const agent = new HangingAgent();
+    const h = await createHarness({ agent, poolCap: 1 });
+    const execution = await h.executor.submit({
+      scopeId: 'scope-hung',
+      policy: policy(h.tmp.workspace),
+    });
+    const collected = collect(execution.subscribe());
+    await Promise.resolve();
+
+    expect(h.activeRuns.interrupt('scope-hung')).toBe(true);
+    await execution.stop();
+
+    expect(await collected).toEqual([
+      { type: 'done', terminationReason: 'interrupted' },
+    ]);
+    expect(agent.runInstance?.stopCalls).toBe(1);
+    expect(h.activeRuns.get('scope-hung')).toBeUndefined();
+    expect(h.pool.snapshot()).toMatchObject({ active: 0, waiting: 0 });
+  });
+
+  it('publishes one timeout terminal event through the same forced-stop path', async () => {
+    const agent = new HangingAgent();
+    const h = await createHarness({ agent });
+    const execution = await h.executor.submit({
+      scopeId: 'scope-timeout',
+      policy: policy(h.tmp.workspace),
+    });
+    const collected = collect(execution.subscribe());
+    await Promise.resolve();
+
+    await execution.handle.requestStop('timeout');
+
+    expect(await collected).toEqual([
+      { type: 'done', terminationReason: 'timeout' },
+    ]);
+    expect(agent.runInstance?.stopCalls).toBe(1);
+    expect(h.activeRuns.get('scope-timeout')).toBeUndefined();
+  });
+
+  it('turns EOF without a terminal event into an explicit failed event', async () => {
+    const h = await createHarness({ events: [{ type: 'text', delta: 'partial' }] });
+    const execution = await h.executor.submit({
+      scopeId: 'scope-eof',
+      policy: policy(h.tmp.workspace),
+    });
+
+    expect(await collect(execution.subscribe())).toEqual([
+      { type: 'text', delta: 'partial' },
+      {
+        type: 'error',
+        message: 'agent event stream ended before a terminal event',
+        terminationReason: 'failed',
+      },
+    ]);
+    expect(h.activeRuns.get('scope-eof')).toBeUndefined();
+    expect(h.pool.snapshot()).toMatchObject({ active: 0, waiting: 0 });
+  });
 });
 
 async function createHarness(options: {
@@ -362,5 +477,41 @@ class DelayedPrepareAgent extends FakeAgentAdapter {
 
   releasePrepare(): void {
     this.resolvePrepare();
+  }
+}
+
+class HangingAgent implements AgentAdapter {
+  readonly id = 'hanging';
+  readonly displayName = 'Hanging';
+  runInstance: HangingRun | undefined;
+
+  async isAvailable(): Promise<boolean> {
+    return true;
+  }
+
+  run(opts: AgentRunOptions): AgentRun {
+    this.runInstance = new HangingRun(opts.runId);
+    return this.runInstance;
+  }
+}
+
+class HangingRun implements AgentRun {
+  readonly events: AsyncIterable<AgentEvent>;
+  stopCalls = 0;
+
+  constructor(readonly runId: string) {
+    this.events = {
+      async *[Symbol.asyncIterator](): AsyncIterator<AgentEvent> {
+        await new Promise<void>(() => {});
+      },
+    };
+  }
+
+  async stop(): Promise<void> {
+    this.stopCalls++;
+  }
+
+  async waitForExit(): Promise<boolean> {
+    return true;
   }
 }

@@ -64,6 +64,7 @@ export function workspacesCard(current: string | undefined, named: Record<string
 export interface StatusInfo {
   profileName: string;
   cwd?: string;
+  emptyCwdText?: string;
   sessionId?: string;
   emptySessionText?: string;
   sessionStale: boolean;
@@ -93,7 +94,9 @@ export function statusCard(info: StatusInfo): object {
     info.chatMode === 'topic'
       ? `\`${escapeCode(info.scope)}\` _（话题独立 session）_`
       : `\`${escapeCode(info.scope)}\``;
-  const cwdLine = info.cwd ? `\`${escapeCode(info.cwd)}\`` : '(未设置)';
+  const cwdLine = info.cwd
+    ? `\`${escapeCode(info.cwd)}\``
+    : (info.emptyCwdText ?? '(未设置)');
   const queueLine = info.queue
     ? `${info.queue.active}/${info.queue.cap} active, ${info.queue.waiting} waiting`
     : 'unknown';
@@ -190,6 +193,7 @@ export function helpCard(agentName = 'Agent'): object {
         '- `/stop comment:<scopeHash>` — 管理员停止云文档评论任务',
         '- `/timeout [N|off|default]` — 当前 session 的探活分钟数,`/config` 改全局默认',
         '- `/timeout comment:<scopeHash> N` — 管理员设置云文档评论任务探活',
+        '- `/model [id|default]` — 查看/设置当前 session 使用的模型',
         '- `/ps` — 列出本机所有 bot,标识当前正在回复的那个',
         '- `/exit <id|#>` — 关掉指定 bot(用 `/ps` 看 id/序号)',
         '- `/reconnect` — 强制重连 WebSocket(网络抖动后 bot 没反应时用)',

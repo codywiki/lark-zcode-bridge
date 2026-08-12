@@ -19,9 +19,15 @@ export type Terminal = 'running' | 'done' | 'interrupted' | 'error' | 'idle_time
 
 export interface RunState {
   blocks: Block[];
+  finalText?: string;
   reasoning: { content: string; active: boolean };
   footer: FooterStatus;
   terminal: Terminal;
+  /** User-visible liveness data, refreshed independently of agent output. */
+  liveStatus?: {
+    elapsedSeconds: number;
+    idleSeconds: number;
+  };
   errorMsg?: string;
   /** Set when terminal === 'idle_timeout' — how long claude was idle before
    * the watchdog gave up (so the message can say "N 分钟无响应"). */
@@ -61,6 +67,9 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
         footer: 'streaming',
       };
     }
+
+    case 'final_text':
+      return { ...state, finalText: evt.content };
 
     case 'thinking': {
       return {

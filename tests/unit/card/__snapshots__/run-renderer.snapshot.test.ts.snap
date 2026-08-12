@@ -11,8 +11,8 @@ exports[`run card renderer snapshots > collapses consecutive tools while preserv
         },
         "elements": [
           {
-            "content": "- ✅ **Bash** — pwd
-- ✅ **Read** — /repo/a.ts",
+            "content": "- **Bash** — pwd
+- **Read** — /repo/a.ts",
             "tag": "markdown",
             "text_size": "notation",
           },
@@ -60,7 +60,7 @@ _运行中…_",
           "icon_expanded_angle": -180,
           "icon_position": "follow_text",
           "title": {
-            "content": "⏳ **Edit** — /repo/a.ts",
+            "content": "**Edit** — /repo/a.ts",
             "tag": "markdown",
           },
           "vertical_align": "center",
@@ -113,9 +113,9 @@ exports[`run card renderer snapshots > collapses consecutive tools while preserv
         },
         "elements": [
           {
-            "content": "- ✅ **Bash** — pwd
-- ✅ **Read** — /repo/a.ts
-- ✅ **Edit** — /repo/a.ts",
+            "content": "- **Bash** — pwd
+- **Read** — /repo/a.ts
+- **Edit** — /repo/a.ts",
             "tag": "markdown",
             "text_size": "notation",
           },
@@ -402,7 +402,7 @@ exports[`run card renderer snapshots > renders initial running state 1`] = `
 exports[`run card renderer snapshots > renders markdown text mode without card-only controls 1`] = `
 "Answer
 
-> ✅ **Bash** — pwd
+> _…1 次读取/检索_
 
 Done
 
@@ -412,7 +412,7 @@ _✍️ 正在输出…_"
 exports[`run card renderer snapshots > renders markdown text mode without card-only controls 2`] = `
 "Answer
 
-> ✅ **Bash** — pwd
+> _…1 次读取/检索_
 
 Done
 
@@ -422,7 +422,7 @@ _⏹ 已被中断_"
 exports[`run card renderer snapshots > renders markdown text mode without card-only controls 3`] = `
 "Answer
 
-> ✅ **Bash** — pwd
+> _…1 次读取/检索_
 
 Done
 
@@ -462,7 +462,7 @@ _运行中…_",
           "icon_expanded_angle": -180,
           "icon_position": "follow_text",
           "title": {
-            "content": "⏳ **Bash** — pwd",
+            "content": "**Bash** — pwd",
             "tag": "markdown",
           },
           "vertical_align": "center",
@@ -538,7 +538,7 @@ pwd
           "icon_expanded_angle": -180,
           "icon_position": "follow_text",
           "title": {
-            "content": "✅ **Bash** — pwd",
+            "content": "**Bash** — pwd",
             "tag": "markdown",
           },
           "vertical_align": "center",
@@ -590,7 +590,7 @@ ENOENT
           "icon_expanded_angle": -180,
           "icon_position": "follow_text",
           "title": {
-            "content": "❌ **Read** — /missing.ts",
+            "content": "⚠️ **Read** — /missing.ts",
             "tag": "markdown",
           },
           "vertical_align": "center",

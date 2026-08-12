@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline';
 import pkg from '../../../package.json';
 import { ClaudeAdapter } from '../../agent/claude/adapter';
 import { CodexAdapter } from '../../agent/codex/adapter';
+import { KimiAdapter } from '../../agent/kimi/adapter';
 import {
   AgentPreflightError,
   formatAgentPreflightDiagnostic,
@@ -40,6 +41,7 @@ import {
   type AcquiredRuntimeLock,
   type RuntimeLockMeta,
 } from '../../runtime/locks';
+import { reapOrphanedChildren } from '../../runtime/orphan-reaper';
 import { resolveProfileRuntime } from '../../runtime/profile-runtime';
 import { refreshOwnerControls } from '../../policy/owner';
 import { SessionStore } from '../../session/store';
@@ -146,6 +148,20 @@ export async function runStart(opts: StartOptions): Promise<void> {
 
         await gcMediaCache(MEDIA_GC_MAX_AGE_MS, appPaths.mediaDir);
         await gcOldLogs();
+
+        // Reap orphaned agent children left by a previous bridge instance that
+        // died ungracefully (SIGKILL / crash) before stopAll() could run. Their
+        // pipe reader is gone, so they can never deliver a result — kill them so
+        // they don't stall forever holding the session open. Locks are held here,
+        // so no live sibling instance for this profile races the reap.
+        try {
+          const reaped = reapOrphanedChildren(appPaths.profileDir);
+          if (reaped > 0) {
+            log.warn('startup', 'reaped-orphaned-children', { profile: appPaths.profile, reaped });
+          }
+        } catch (err) {
+          log.warn('startup', 'reap-failed', { err: err instanceof Error ? err.message : String(err) });
+        }
 
         // Same-app conflict detection. Open-platform routes events to one of the
         // long-connections at random, so two `start` of the same app makes "who
@@ -372,11 +388,17 @@ async function checkRuntimeAgentAvailability(agent: AgentAdapter): Promise<Agent
   if (agent.checkAvailability) return agent.checkAvailability();
   const ok = await agent.isAvailable();
   if (ok) return { ok: true };
+  const fallback =
+    agent.id === 'codex'
+      ? { agentId: 'codex' as const, command: 'codex' }
+      : agent.id === 'kimi'
+        ? { agentId: 'kimi' as const, command: 'kimi' }
+        : { agentId: 'claude' as const, command: 'claude' };
   const diagnostic = {
     code: 'agent-binary-not-found' as const,
-    agentId: agent.id === 'codex' ? 'codex' as const : 'claude' as const,
+    agentId: fallback.agentId,
     agentName: agent.displayName,
-    command: agent.id === 'codex' ? 'codex' : 'claude',
+    command: fallback.command,
   };
   return {
     ok: false,
@@ -431,6 +453,18 @@ export function createRuntimeAgent(
       ignoreUserConfig: codex.ignoreUserConfig === true,
       ignoreRules: codex.ignoreRules !== false,
       sandbox: profileConfig.sandbox.defaultMode,
+      larkChannel,
+    });
+  }
+  if (profileConfig.agentKind === 'kimi') {
+    const kimi = profileConfig.kimi;
+    if (!kimi?.binaryPath) {
+      throw new Error('kimi profile requires kimi.binaryPath');
+    }
+    return new KimiAdapter({
+      binary: kimi.binaryPath,
+      defaultModel: kimi.defaultModel,
+      profileStateDir: appPaths.profileDir,
       larkChannel,
     });
   }

@@ -158,6 +158,7 @@ const ID_KEYS = new Set([
 ]);
 
 const MAX_LOG_STRING_CHARS = 4096;
+const MAX_LOG_VALUE_DEPTH = 32;
 const CREDENTIAL_JSON_FIELD_RE =
   /("(?:secret|app_secret|appSecret|token|access_token|tenant_access_token|app_access_token|authorization)"\s*:\s*")[^"]*(")/gi;
 const ESCAPED_CREDENTIAL_JSON_FIELD_RE =
@@ -179,8 +180,9 @@ function sanitizeLogEntry(
   options: SanitizeOptions = EXTERNAL_SANITIZE,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
+  const ancestors = new WeakSet<object>();
   for (const [key, value] of Object.entries(entry)) {
-    out[key] = sanitizeLogValue(key, value, options);
+    out[key] = sanitizeLogValue(key, value, options, ancestors);
   }
   return out;
 }
@@ -189,6 +191,8 @@ function sanitizeLogValue(
   key: string,
   value: unknown,
   options: SanitizeOptions = EXTERNAL_SANITIZE,
+  ancestors: WeakSet<object> = new WeakSet<object>(),
+  depth = 0,
 ): unknown {
   const normalizedKey = key.startsWith('_') ? key.slice(1) : key;
   if (value === undefined) return undefined;
@@ -200,14 +204,49 @@ function sanitizeLogValue(
   if (RESOURCE_ID_KEYS.has(normalizedKey)) return '[REDACTED_RESOURCE]';
   if (options.redactIds && ID_KEYS.has(normalizedKey)) return redactId(value);
   if (Array.isArray(value)) {
-    return value.map((item) => sanitizeLogValue(key, item, options));
+    if (depth >= MAX_LOG_VALUE_DEPTH) return '[MaxDepth]';
+    if (ancestors.has(value)) return '[Circular]';
+    ancestors.add(value);
+    try {
+      return value.map((item) => sanitizeLogValue(key, item, options, ancestors, depth + 1));
+    } catch {
+      return '[Unserializable]';
+    } finally {
+      ancestors.delete(value);
+    }
   }
   if (value && typeof value === 'object') {
+    if (depth >= MAX_LOG_VALUE_DEPTH) return '[MaxDepth]';
+    if (ancestors.has(value)) return '[Circular]';
+    ancestors.add(value);
     const nested: Record<string, unknown> = {};
-    for (const [nestedKey, nestedValue] of Object.entries(value)) {
-      nested[nestedKey] = sanitizeLogValue(nestedKey, nestedValue, options);
+    try {
+      let keys: string[];
+      try {
+        keys = Object.keys(value);
+      } catch {
+        return '[Unserializable]';
+      }
+      for (const nestedKey of keys) {
+        let nestedValue: unknown;
+        try {
+          nestedValue = (value as Record<string, unknown>)[nestedKey];
+        } catch {
+          nested[nestedKey] = '[Unserializable]';
+          continue;
+        }
+        nested[nestedKey] = sanitizeLogValue(
+          nestedKey,
+          nestedValue,
+          options,
+          ancestors,
+          depth + 1,
+        );
+      }
+      return nested;
+    } finally {
+      ancestors.delete(value);
     }
-    return nested;
   }
   if (typeof value === 'string') {
     const redacted = redactDiagnosticText(value);

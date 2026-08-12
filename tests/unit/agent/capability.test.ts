@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { BRIDGE_SYSTEM_PROMPT } from '../../../src/agent/bridge-system-prompt';
-import { claudeCapability, codexCapability } from '../../../src/agent/capability';
+import {
+  capabilityForProfile,
+  claudeCapability,
+  codexCapability,
+  kimiCapability,
+} from '../../../src/agent/capability';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
 
 describe('agent capability contract', () => {
@@ -71,5 +76,53 @@ describe('agent capability contract', () => {
     });
 
     expect(codexCapability(profile).permissions.maxAccess).toBe('read-only');
+  });
+
+  it('defines Kimi sessions with a read-only compatibility ceiling when no profile is provided', () => {
+    expect(kimiCapability()).toMatchObject({
+      agentId: 'kimi',
+      sessionKind: 'kimi-session',
+      promptInjection: 'stdin-prefix',
+      supportsNativeHistory: false,
+      systemPrompt: BRIDGE_SYSTEM_PROMPT,
+      permissions: {
+        maxAccess: 'read-only',
+      },
+    });
+  });
+
+  it('uses Kimi profile max access as the static capability ceiling', () => {
+    const profile = createDefaultProfileConfig({
+      agentKind: 'kimi',
+      accounts: {
+        app: {
+          id: 'cli_test',
+          secret: '${APP_SECRET}',
+          tenant: 'feishu',
+        },
+      },
+      kimi: { binaryPath: 'kimi' },
+      permissions: { defaultAccess: 'full', maxAccess: 'full' },
+    });
+
+    expect(kimiCapability(profile).permissions.maxAccess).toBe('full');
+  });
+
+  it('selects capability from the profile kind', () => {
+    const profile = createDefaultProfileConfig({
+      agentKind: 'kimi',
+      accounts: {
+        app: {
+          id: 'cli_test',
+          secret: '${APP_SECRET}',
+          tenant: 'feishu',
+        },
+      },
+      kimi: { binaryPath: 'kimi' },
+      permissions: { defaultAccess: 'full', maxAccess: 'full' },
+    });
+
+    expect(capabilityForProfile(profile).permissions.maxAccess).toBe('full');
+    expect(capabilityForProfile(profile).agentId).toBe('kimi');
   });
 });

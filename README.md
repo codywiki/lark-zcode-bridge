@@ -1,6 +1,6 @@
 # lark-channel-bridge
 
-A lightweight bot that bridges Feishu / Lark messenger with your local Claude Code or Codex CLI. Run one command, scan a QR code to bind a PersonalAgent app, and talk to your local coding agent from chat.
+A lightweight bot that bridges Feishu / Lark messenger with your local Claude Code, Codex CLI, or Kimi Code CLI. Run one command, scan a QR code to bind a PersonalAgent app, and talk to your local coding agent from chat.
 
 [中文 README](./README.zh.md)
 
@@ -8,8 +8,9 @@ For a product walkthrough, see the [Feishu document](https://larkcommunity.feish
 
 ## What it does
 
-- Forwards Feishu / Lark messages to local Claude Code or Codex CLI. Send a DM directly, or `@bot` in a group.
+- Forwards Feishu / Lark messages to local Claude Code, Codex CLI, or Kimi Code CLI. Send a DM directly, or `@bot` in a group.
 - **Streaming card**: text replies and tool calls update on one Lark card in real time.
+- **Global completion summary**: every successful streamed run ends with one separate, bounded plain-text result summary for all profiles; plain-text reply mode is not duplicated.
 - **Session continuity**: each chat, topic, or document comment thread keeps its own session.
 - **Queueing and batching**: messages sent in quick succession are handled together; messages sent during a run are queued for the next turn, while commands like `/new`, `/cd`, `/ws use`, and `/stop` can interrupt the current task.
 - **Multiple workspaces**: use `/cd` to switch the current project, and `/ws` to save and reuse common project directories.
@@ -19,9 +20,10 @@ For a product walkthrough, see the [Feishu document](https://larkcommunity.feish
 ## Prerequisites
 
 - Node.js **>= 20.12.0**
-- At least one local agent installed and logged in:
+- At least one local agent installed and authenticated as described for that agent:
   - Claude Code: `claude`, see https://docs.anthropic.com/en/docs/claude-code/quickstart
   - Codex CLI: `codex`, see https://developers.openai.com/codex/cli
+  - Kimi Code CLI: `kimi`, see https://moonshotai.github.io/kimi-code/. Do not use the global `kimi login` for a bridge bot; log in the isolated profile after creating it, as shown below.
 - A Feishu / Lark **PersonalAgent** app. The first-run QR wizard can create and bind one for you.
 
 ## Install
@@ -87,14 +89,19 @@ Platform mapping:
 
 Daemon logs are under `~/.lark-channel/profiles/<profile>/logs/daemon/`.
 
-### Multiple profiles: Claude and Codex
+### Multiple profiles: Claude, Codex, and Kimi
 
-By default, the bridge starts with the currently selected profile. Use `profile use <name>` to change it. Each profile keeps its own app credentials, sessions, working directories, and logs. Create multiple profiles only when you need to connect multiple PersonalAgent apps, or run Claude and Codex as separate bots:
+By default, the bridge starts with the currently selected profile. Use `profile use <name>` to change it. Each profile keeps its own app credentials, sessions, working directories, and logs. Create multiple profiles only when you need to connect multiple PersonalAgent apps, or run Claude, Codex, and Kimi as separate bots:
 
 ```bash
-lark-channel-bridge start --profile claude --agent claude
-lark-channel-bridge start --profile codex --agent codex
+lark-channel-bridge profile create kimi --agent kimi --workspace /path/to/a/narrow/project
+lark-channel-bridge profile login kimi
+lark-channel-bridge start --profile kimi
 ```
+
+`profile login kimi` keeps Kimi credentials under `~/.lark-channel/profiles/kimi/kimi-home`; a normal global `kimi login` does not authorize this isolated bot profile. Claude and Codex profiles can continue to be created and started in the usual way.
+
+The Kimi adapter uses `kimi acp` and is currently a macOS-only, text-only pilot pinned to Kimi Code **0.29.2**; other versions fail closed. New Kimi profiles default to read-only. In that mode, every bot ACP run and its pre-run Kimi config validation is wrapped in macOS Seatbelt. Direct workspace file data is denied to the Kimi process; text reads go through a bridge-owned ACP handler that enforces realpath containment, sensitive-path checks, regular UTF-8 files, and a 1 MiB limit. The bridge enables only known-path `Read` and metadata checks; directory listing and Glob/Grep are unavailable. It forces the `default`/manual session mode, denies approvals, and disables writes, process execution, attachments, MCP, subagents, skills, hooks, and plugins. The read-only boundary is enforced independently by tool deny rules, the reverse ACP file handler, and Seatbelt rather than by session mode. It also refuses workspaces that expose Kimi bootstrap extension files such as `AGENTS.md`, MCP config, local Kimi config, or project skill directories. Read-only runs fail closed when macOS Seatbelt is unavailable. Kimi `workspace` mode keeps Seatbelt, allows local Shell/process execution, and limits project-data reads and writes to the active current working directory. Its additional read exceptions are the Apple `system.sb` runtime baseline, the Kimi installation directory, and the isolated profile home; only the isolated profile home is also writable. Explicitly setting both Kimi permission values to `full` opts into local Shell and file read/write/edit tools without Seatbelt. Full mode runs with the bridge OS user's permissions and is not restricted to the selected workspace: it can execute arbitrary commands and read, change, delete, or expose any local file or credential that user can access. Use it only with a dedicated, trusted profile and OS account. Cloud-document comments are not handled. Kimi reasoning is never shown, and answer text is buffered up to 20 KB until the turn finishes and then path-sanitized before reaching a card, so this pilot does not stream Kimi answer text chunk by chunk. Read tool panels expose only a bounded path/line summary and completion status, never raw file output. For team use, create a separate PersonalAgent app and profile for Kimi instead of reusing Claude or Codex bot credentials.
 
 For example, to restart only the Codex bot:
 
@@ -108,18 +115,20 @@ lark-channel-bridge status --profile codex
 ### Host CLI
 
 ```text
-lark-channel-bridge run [--profile <name>] [--agent claude|codex] [--workspace <path>] [-c <config>]
-lark-channel-bridge migrate [--profile <name>] [--agent claude|codex]
+lark-channel-bridge run [--profile <name>] [--agent claude|codex|kimi] [--workspace <path>] [-c <config>]
+lark-channel-bridge migrate [--profile <name>] [--agent claude|codex|kimi]
 lark-channel-bridge ps
 lark-channel-bridge kill <id|#>
 lark-channel-bridge --help
 ```
 
-`profile use <name>` changes the profile used by later default starts. Use these profile management commands when running separate Claude / Codex bots, connecting multiple PersonalAgent apps, or doing scripted deployment:
+`profile use <name>` changes the profile used by later default starts. Use these profile management commands when running separate Claude / Codex / Kimi bots, connecting multiple PersonalAgent apps, or doing scripted deployment:
 
 ```bash
 lark-channel-bridge profile create claude --agent claude
 lark-channel-bridge profile create codex --agent codex
+lark-channel-bridge profile create kimi --agent kimi
+lark-channel-bridge profile login kimi
 lark-channel-bridge profile list
 lark-channel-bridge profile use <name>
 lark-channel-bridge profile remove <name>
@@ -148,7 +157,7 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 | `/invite user @name` | Allow a user to use the bot in DMs |
 | `/invite admin @name` | Add an access-control admin |
 | `/invite group` | Allow the current group to use the bot |
-| `/invite all group` | Allow all groups the bot has joined |
+| `/invite all group` | Allow all groups the bot has joined (disabled for Kimi profiles) |
 | `/remove user @name`, `/remove admin @name`, `/remove group` | Remove access entries |
 | `/stop` | Stop the current run, including the card stop button |
 | `/timeout [N\|off\|default]` | Set or clear the current session idle watchdog |
@@ -168,23 +177,27 @@ The default policy is `bot-only`: lark-cli uses the app/bot identity and does no
 
 ## Working directories
 
-Each profile may define a default working directory through `workspaces.default`. New profiles may be created with `--workspace <path>`; if omitted, the bridge creates a profile-managed default working directory.
+Each profile may define a default working directory through `workspaces.default`. New profiles may be created with `--workspace <path>`; if omitted, the bridge creates a profile-managed default working directory. A Kimi profile may also define additional selectable roots with `workspaces.allowedRoots`; the default directory is always an implicit authorized root.
 
 This is a profile-field snippet. Do not replace the whole `config.json` with it; edit the matching profile's `workspaces` field.
 
 ```json
 {
   "workspaces": {
-    "default": "/Users/me/.lark-channel-workspaces/claude/default"
+    "default": "/Users/me/Kimi Code",
+    "allowedRoots": [
+      "/Users/me/Kimi Projects/client-a",
+      "/Volumes/Work/Kimi Projects/client-b"
+    ]
   }
 }
 ```
 
-The bridge checks that a selected directory exists, is a directory, and is not an overly broad location such as `/`, the home root, a system directory, or a temp root. The working directory is only the current directory for an agent run. It is not a filesystem sandbox; actual file access still depends on the local agent process and its permission mode.
+The bridge checks that every configured root and selected directory exists, is a directory, resolves inside an authorized root, and is not an overly broad location such as `/`, the home root, a system directory, or a temp root. For Kimi, `/cd` and `/ws use` may select the default or any additional root (or one of their descendants), but each run receives only its one active canonical working directory. Adding a root requires editing the local profile and restarting the profile service; chat commands cannot expand this allowlist. The working directory is not a filesystem sandbox for unsandboxed permission modes; actual file access still depends on the local agent process and its permission mode.
 
 ## Permission modes
 
-The recommended user-facing profile config is `permissions.defaultAccess` and `permissions.maxAccess`. New profiles default to `full` for both values so the bridge can keep local tools, authorization flows, file writes, and other agent features fully usable. To tighten a profile, set one or both values to `workspace` or `read-only`; stricter modes can limit local tool execution, login/authorization flows, file writes, and similar capabilities.
+The recommended user-facing profile config is `permissions.defaultAccess` and `permissions.maxAccess`. New Claude and Codex profiles default to `full` for both values so the bridge can keep local tools, authorization flows, file writes, and other agent features fully usable. New Kimi profiles still default both values to `read-only`, which keeps the Seatbelt and ACP-controlled read boundary. Kimi `workspace` keeps Seatbelt while enabling local Shell/process execution and project-data file read/write/edit access inside the active current working directory, subject to the narrow runtime exceptions above. Setting both Kimi values explicitly to `full` enables those local tools without Seatbelt. To tighten a Claude or Codex profile, set one or both values to `workspace` or `read-only`; stricter modes can limit local tool execution, login/authorization flows, file writes, and similar capabilities.
 
 This is a profile-field snippet. Do not replace the whole `config.json` with it; edit the matching profile's `permissions` field.
 
@@ -199,11 +212,13 @@ This is a profile-field snippet. Do not replace the whole `config.json` with it;
 
 Mode mapping:
 
-| Bridge access | Claude permission mode | Codex mode |
-|---|---|---|
-| `full` | `bypassPermissions` | `danger-full-access` |
-| `workspace` | `acceptEdits` | `workspace-write` |
-| `read-only` | `plan` | `read-only` |
+| Bridge access | Claude permission mode | Codex mode | Kimi ACP mode |
+|---|---|---|---|
+| `full` | `bypassPermissions` | `danger-full-access` | No Seatbelt; local Shell + file read/write/edit with OS-user access |
+| `workspace` | `acceptEdits` | `workspace-write` | Seatbelt; local Shell/process execution + project-data file read/write/edit limited to active cwd |
+| `read-only` | `plan` | `read-only` | Seatbelt + ACP read-only; forced `default`/manual; approvals denied |
+
+For Kimi, `full` is an explicit high-risk opt-in: the configured workspace is only the process working directory, not a filesystem boundary. The process can run arbitrary local commands and access anything available to the bridge OS user. Use a dedicated OS account and profile, and keep `read-only` unless that exposure is acceptable. Attachments are still rejected before download and do not enter the prompt.
 
 The legacy `sandbox` field is still readable for old configs. After the bridge saves the profile, it migrates that setting to canonical `permissions`.
 
@@ -249,7 +264,7 @@ To let other people or groups in, add them to one of three lists:
 - **Just me** → nothing to do; this is the default.
 - **Let a teammate DM the bot** → `/invite user @them`
 - **Open a work group to everyone in it** → send `/invite group` inside that group
-- **First-time setup, onboard every group the bot is already in** → `/invite all group` pulls them all into the list at once; trim with `/remove group` afterwards
+- **First-time Claude/Codex setup, onboard every group the bot is already in** → `/invite all group` pulls them all into the list at once; trim with `/remove group` afterwards. Kimi profiles reject this command.
 - **Add a co-admin** → `/invite admin @them`
 
 ### Worth knowing
@@ -258,6 +273,12 @@ To let other people or groups in, add them to one of three lists:
 - **In groups you must `@` the bot first** (DMs don't need it). That's a separate toggle (`/config` → "require @ in groups"), independent of the lists above.
 - Strangers get pure silence — no reply at all. The one exception: if someone `@`-mentions the bot in a group that hasn't been opened up, the bot posts a friendly one-liner telling them an admin can run `/invite group` to enable it.
 - Cloud-doc comments are document-scoped: anyone who can comment in a supported document and mention the bot can trigger a reply.
+
+### Recommended Kimi group pilot
+
+Pilot Kimi only in selected groups or topic groups. Open groups individually with `/invite group`, keep “require @ in groups” enabled, and use a dedicated, sanitized workspace copy containing only material approved for every pilot-group member; do not point it at a broad production repository. Kimi profiles fail closed on `/invite all group`. Once a chat is in `allowedChats`, every member of that chat can invoke the bot through one shared local service account. The bridge does not currently perform an additional tenant-membership check, enforce source-level authorization, or provide per-user quotas. Topic groups isolate sessions by thread, while regular groups share a chat-level session, so topic groups are safer for concurrent pilots.
+
+Keep this pilot at low concurrency: Kimi config validation currently runs synchronously before each ACP turn and can pause the bot while validation is in progress. Install any console/telemetry instrumentation before starting the Kimi profile; do not hot-load or hot-reload instrumentation that replaces `console.error` during an active Kimi run. Restart the profile after changing instrumentation.
 
 ### Advanced: editing the config file directly
 
@@ -290,13 +311,13 @@ Each line carries `chatId` (group / DM id) and `senderId` (user `open_id`). Afte
 
 ## Cloud-doc comments
 
-Cloud-doc comments do not need a separate workspace binding or document allowlist. In supported document comments, mention the bot and the bridge replies in the same thread. Comment runs reuse the document session key and fall back to the user home directory when no document cwd was previously recorded.
+Cloud-doc comments do not need a separate workspace binding or document allowlist. In supported document comments, mention the bot and the bridge replies in the same thread. Comment runs reuse the document session key and fall back to the user home directory when no document cwd was previously recorded. The Kimi ACP pilot does not process cloud-document comments.
 
 ## FAQ
 
-**The bot stays silent or the local CLI never replies.** Usually the local `claude` or `codex` CLI is not logged in, or the current session points to a working directory that no longer exists. Send `/status` to inspect; `/new` often fixes it by starting a fresh session.
+**The bot stays silent or the local CLI never replies.** Usually the local `claude`, `codex`, or `kimi` CLI is not logged in, or the current session points to a working directory that no longer exists. Send `/status` to inspect; `/new` often fixes it by starting a fresh session.
 
-**The agent subprocess looks frozen (card stuck on the last frame).** The bridge supports an idle watchdog: if the agent emits nothing for N minutes, the process is killed and the card is annotated with the auto-termination reason. Disabled by default. Enable with `/config` globally, or `/timeout 10` for the current session; `/timeout off` disables it for the session; `/timeout default` clears the session override.
+**The agent subprocess looks frozen (card stuck on the last frame).** The bridge enables a 20-minute idle watchdog by default: if the agent emits no event during that window, the run is stopped and the card is annotated with the auto-termination reason. Tool calls are covered too, so a missing tool result cannot suspend the watchdog forever. Change the global value with `/config`, override the current session with `/timeout N`, use `/timeout off` for an exceptional long-silence run, or `/timeout default` to clear that override.
 
 **The agent says it cannot see an image I sent.** Upgrade to the latest version. Releases before 0.1.0 had a filename-dedup bug.
 

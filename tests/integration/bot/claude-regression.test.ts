@@ -1,7 +1,11 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getMessageReplyMode, getRequireMentionInGroup } from '../../../src/config/schema.js';
+import {
+  getMessageReplyMode,
+  getRequireMentionInGroup,
+  getRunIdleTimeoutMs,
+} from '../../../src/config/schema.js';
 import { PendingQueue } from '../../../src/bot/pending-queue.js';
 import type { NormalizedMessage } from '@larksuite/channel';
 
@@ -29,6 +33,20 @@ describe('Claude IM regression boundaries', () => {
 
     expect(getMessageReplyMode(defaultCfg)).toBe('markdown');
     expect(getMessageReplyMode(cardCfg)).toBe('card');
+  });
+
+  it('enables a 20-minute watchdog by default while preserving an explicit off switch', () => {
+    const base = {
+      accounts: { app: { id: 'app-id', secret: 'secret', tenant: 'feishu' as const } },
+    };
+
+    expect(getRunIdleTimeoutMs(base)).toBe(20 * 60_000);
+    expect(
+      getRunIdleTimeoutMs({
+        ...base,
+        preferences: { runIdleTimeoutMinutes: 0 },
+      }),
+    ).toBeUndefined();
   });
 
   it('queues messages that arrive while a run is active and flushes them as the next batch', () => {
@@ -60,6 +78,17 @@ describe('Claude IM regression boundaries', () => {
     expect(source).toContain('getRequireMentionInGroup(controls.cfg)');
     expect(source).toContain('!msg.mentionedBot');
     expect(source).toContain('msg.chatType !== \'p2p\'');
+  });
+
+  it('preserves ordinary queued messages when a slash command bypasses the queue', async () => {
+    const source = await readFile(join(process.cwd(), 'src/bot/channel.ts'), 'utf8');
+    const commandBranch = source.slice(
+      source.indexOf('const handled = await tryHandleCommand({'),
+      source.indexOf('const size = pending.push(scope, msg);'),
+    );
+
+    expect(commandBranch).toContain("pending: 'preserved'");
+    expect(commandBranch).not.toContain('pending.cancel(scope)');
   });
 });
 

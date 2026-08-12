@@ -51,6 +51,36 @@ describe('first-run profile bootstrap', () => {
     await expect(stat(join(profileDir, 'codex-home'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('creates a read-only Kimi profile from LARK_CHANNEL_KIMI_BIN', async () => {
+    const root = await makeRoot();
+    const workspace = join(root, 'workspace');
+    await mkdir(workspace, { recursive: true });
+    const kimi = await writeVersionExecutable(root, 'kimi', 'kimi 0.29.2');
+    const previous = process.env.LARK_CHANNEL_KIMI_BIN;
+    process.env.LARK_CHANNEL_KIMI_BIN = kimi;
+
+    try {
+      const profile = await createBootstrapProfileConfig({
+        agentKind: 'kimi',
+        accounts: { app: { id: 'cli_kimi', secret: '${APP_SECRET}', tenant: 'feishu' } },
+        workspace,
+      });
+
+      expect(profile.agentKind).toBe('kimi');
+      expect(profile.kimi).toEqual({ binaryPath: kimi, defaultModel: 'kimi-code/k3' });
+      expect(profile.permissions).toEqual({
+        defaultAccess: 'read-only',
+        maxAccess: 'read-only',
+      });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.LARK_CHANNEL_KIMI_BIN;
+      } else {
+        process.env.LARK_CHANNEL_KIMI_BIN = previous;
+      }
+    }
+  });
+
   it('creates a profile without requiring a user workspace', async () => {
     const root = await makeRoot();
     const defaultWorkspace = join(root, 'managed-workspaces', 'codex-dev', 'default');
@@ -135,9 +165,11 @@ describe('first-run profile bootstrap', () => {
     const oldPath = process.env.PATH;
     const oldClaude = process.env.LARK_CHANNEL_CLAUDE_BIN;
     const oldCodex = process.env.LARK_CHANNEL_CODEX_BIN;
+    const oldKimi = process.env.LARK_CHANNEL_KIMI_BIN;
     process.env.PATH = root;
     process.env.LARK_CHANNEL_CLAUDE_BIN = 'missing-claude';
     process.env.LARK_CHANNEL_CODEX_BIN = process.platform === 'win32' ? codex : 'codex';
+    process.env.LARK_CHANNEL_KIMI_BIN = 'missing-kimi';
     try {
       await expect(detectInstalledAgents()).resolves.toEqual([
         { kind: 'codex', binaryPath: codex },
@@ -153,6 +185,47 @@ describe('first-run profile bootstrap', () => {
         delete process.env.LARK_CHANNEL_CODEX_BIN;
       } else {
         process.env.LARK_CHANNEL_CODEX_BIN = oldCodex;
+      }
+      if (oldKimi === undefined) {
+        delete process.env.LARK_CHANNEL_KIMI_BIN;
+      } else {
+        process.env.LARK_CHANNEL_KIMI_BIN = oldKimi;
+      }
+    }
+  });
+
+  it('detects Kimi from LARK_CHANNEL_KIMI_BIN', async () => {
+    const root = await makeRoot();
+    const kimi = await writeVersionExecutable(root, 'kimi', 'kimi 0.29.2');
+    const oldPath = process.env.PATH;
+    const oldClaude = process.env.LARK_CHANNEL_CLAUDE_BIN;
+    const oldCodex = process.env.LARK_CHANNEL_CODEX_BIN;
+    const oldKimi = process.env.LARK_CHANNEL_KIMI_BIN;
+    process.env.PATH = root;
+    process.env.LARK_CHANNEL_CLAUDE_BIN = 'missing-claude';
+    process.env.LARK_CHANNEL_CODEX_BIN = 'missing-codex';
+    process.env.LARK_CHANNEL_KIMI_BIN = kimi;
+
+    try {
+      await expect(detectInstalledAgents()).resolves.toEqual([
+        { kind: 'kimi', binaryPath: kimi },
+      ]);
+    } finally {
+      process.env.PATH = oldPath;
+      if (oldClaude === undefined) {
+        delete process.env.LARK_CHANNEL_CLAUDE_BIN;
+      } else {
+        process.env.LARK_CHANNEL_CLAUDE_BIN = oldClaude;
+      }
+      if (oldCodex === undefined) {
+        delete process.env.LARK_CHANNEL_CODEX_BIN;
+      } else {
+        process.env.LARK_CHANNEL_CODEX_BIN = oldCodex;
+      }
+      if (oldKimi === undefined) {
+        delete process.env.LARK_CHANNEL_KIMI_BIN;
+      } else {
+        process.env.LARK_CHANNEL_KIMI_BIN = oldKimi;
       }
     }
   });

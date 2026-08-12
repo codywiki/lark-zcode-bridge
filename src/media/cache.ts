@@ -6,6 +6,7 @@ import type { LarkChannel, ResourceDescriptor } from '@larksuite/channel';
 import { paths } from '../config/paths';
 import { log } from '../core/logger';
 import {
+  extensionFromFileName,
   normalizeAttachments,
   safeExtensionForMime,
   type AttachmentCandidate,
@@ -96,7 +97,12 @@ export class MediaCache {
     const tmpStat = await stat(tmpPath);
     const hash = await hashFile(tmpPath);
     const mime = contentType ?? defaultMime(kind);
-    const ext = safeExtensionForMime(mime);
+    let ext = safeExtensionForMime(mime);
+    // Unknown mime → 'bin' would make e.g. an .html/.docx attachment land on
+    // disk opaque; recover the extension from the sender-visible filename.
+    if (ext === 'bin' && r.fileName) {
+      ext = extensionFromFileName(r.fileName) ?? ext;
+    }
     const absPath = join(this.rootDir, `${hash}.${ext}`);
     try {
       await stat(absPath);

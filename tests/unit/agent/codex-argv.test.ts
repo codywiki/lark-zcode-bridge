@@ -118,4 +118,57 @@ describe('Codex argv contract', () => {
     ).toContain('--ignore-user-config');
   });
 
+  it('passes model and reasoning effort as exec-level options', () => {
+    expect(
+      buildCodexArgs({
+        cwd: '/repo',
+        sandbox: 'read-only',
+        model: 'gpt-5.5',
+        reasoningEffort: 'ultra',
+      }),
+    ).toEqual([
+      'exec',
+      '--json',
+      '--sandbox',
+      'read-only',
+      '--model',
+      'gpt-5.5',
+      '-c',
+      'model_reasoning_effort="ultra"',
+      '-c',
+      'approval_policy="never"',
+      '-c',
+      'shell_environment_policy.inherit="all"',
+      '--ignore-rules',
+      '--skip-git-repo-check',
+      '-C',
+      '/repo',
+      '-',
+    ]);
+  });
+
+  it('keeps model options before the resume subcommand', () => {
+    expect(
+      buildCodexArgs({
+        cwd: '/repo',
+        sandbox: 'read-only',
+        threadId: 'thread-123',
+        model: 'gpt-5',
+        reasoningEffort: 'medium',
+      }).slice(0, 11),
+    ).toEqual([
+      'exec',
+      '--sandbox',
+      'read-only',
+      '--model',
+      'gpt-5',
+      '-c',
+      'model_reasoning_effort="medium"',
+      '-c',
+      'approval_policy="never"',
+      '-c',
+      'shell_environment_policy.inherit="all"',
+    ]);
+  });
+
 });

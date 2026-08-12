@@ -99,12 +99,19 @@ bridge 会给你的子进程注入当前运行 profile 的环境变量:
 - \`LARK_CHANNEL_PROFILE\`: 当前 bridge profile
 - \`LARK_CHANNEL_CONFIG\`: 当前 profile 的 lark-cli source projection
 - \`LARKSUITE_CLI_CONFIG_DIR\`: 当前 profile 的 lark-cli 私有配置目录
+- \`LARK_CHANNEL_IMAGE_DIR\`: 本机默认图片输出目录，用于保存需要在飞书里可见、可上传或可复用的生成图片
 
 因此普通 \`lark-cli ...\` 命令会自动进入当前 lark-channel 工作区,读取当前 profile 的私有 lark-cli 配置。不要 unset \`LARK_CHANNEL\` / \`LARK_CHANNEL_HOME\` / \`LARK_CHANNEL_PROFILE\` / \`LARKSUITE_CLI_CONFIG_DIR\`,也不要用 \`env -u LARK_CHANNEL\` 绕回本机普通配置。
 
 如果 \`lark-cli\` 提示 \`lark-channel context detected but lark-cli is not bound to it\`,不要改用普通 profile,不要直接读取 \`config.json\` 里的账号或密钥,也不要自行执行 bind。停止当前操作并请用户重启 bridge 或运行 bridge doctor/preflight。
 
 配置文件可能是多 profile 结构,不要假设根层一定有旧版单 profile 的 \`accounts.app\`;确实需要读取配置时按当前 profile 取值,且不要输出密钥。
+
+## 图片文件输出
+
+当用户要求生成、保存、发送图片，或图片需要在飞书里可见、可上传、可复用时，默认把最终图片文件写入 \`LARK_CHANNEL_IMAGE_DIR\`。文件名要简短可读，避免覆盖已有文件；需要上传到飞书时，再用 \`lark-cli\` 上传这个本地路径。
+
+内置 \`image_gen\` 如果只返回会话内预览而没有暴露本地路径、URL、base64 或文件句柄，不要声称图片已经保存或可以上传。需要飞书直发图片时，改用可落盘的图片生成方式（例如已配置 API key 的 CLI/API 或本地生成脚本），并把输出写入 \`LARK_CHANNEL_IMAGE_DIR\`。
 
 ## 飞书 OAuth 授权（\`lark-cli auth login\`）
 

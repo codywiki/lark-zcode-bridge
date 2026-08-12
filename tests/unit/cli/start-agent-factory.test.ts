@@ -69,6 +69,43 @@ describe('start runtime agent factory', () => {
     expect(profile.codex?.binaryPath).toBe('codex');
   });
 
+  it('creates KimiAdapter from a Kimi profile', () => {
+    const agent = createRuntimeAgent(
+      createDefaultProfileConfig({
+        agentKind: 'kimi',
+        accounts: appAccount(),
+        kimi: { binaryPath: '/usr/local/bin/kimi' },
+      }),
+      { profileDir: '/tmp/lark-channel-bridge/profiles/kimi-pilot' },
+    );
+
+    expect(agent.id).toBe('kimi');
+    expect(agent.displayName).toBe('Kimi Code CLI');
+  });
+
+  it('seeds the configured Kimi command with read-only defaults', () => {
+    const previous = process.env.LARK_CHANNEL_KIMI_BIN;
+    process.env.LARK_CHANNEL_KIMI_BIN = '/opt/kimi/bin/kimi';
+    try {
+      const profile = createRuntimeProfileConfig({
+        agentKind: 'kimi',
+        accounts: appAccount(),
+      });
+
+      expect(profile.kimi?.binaryPath).toBe('/opt/kimi/bin/kimi');
+      expect(profile.permissions).toEqual({
+        defaultAccess: 'read-only',
+        maxAccess: 'read-only',
+      });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.LARK_CHANNEL_KIMI_BIN;
+      } else {
+        process.env.LARK_CHANNEL_KIMI_BIN = previous;
+      }
+    }
+  });
+
   it('updates the process registry before releasing the old app lock during reconnect', async () => {
     const source = await readFile(join(process.cwd(), 'src/cli/commands/start.ts'), 'utf8');
     const restartStart = source.indexOf('async restart()');

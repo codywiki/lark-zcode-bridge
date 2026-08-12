@@ -1,4 +1,4 @@
-import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
 import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { mkdtemp } from 'node:fs/promises';
@@ -141,6 +141,210 @@ describe('profile runtime resolver', () => {
     expect(secret).toBe('manual-secret');
   });
 
+  it('bootstraps and persists an explicit Kimi profile', async () => {
+    const root = await tmpRoot();
+    const kimi = await writeExecutable(join(root, 'bin'), 'kimi');
+    const previous = process.env.LARK_CHANNEL_KIMI_BIN;
+    process.env.LARK_CHANNEL_KIMI_BIN = kimi;
+
+    try {
+      const runtime = await resolveProfileRuntime({
+        config: join(root, 'config.json'),
+        profile: 'kimi-pilot',
+        agent: 'kimi',
+        allowBootstrap: true,
+        appId: 'cli_kimi',
+        appSecret: 'manual-secret',
+        tenant: 'feishu',
+      });
+      const saved = JSON.parse(await readFile(join(root, 'config.json'), 'utf8')) as {
+        profiles: Record<string, {
+          agentKind?: string;
+          kimi?: { binaryPath?: string; defaultModel?: string };
+          permissions?: { defaultAccess?: string; maxAccess?: string };
+        }>;
+      };
+
+      expect(runtime.profile).toBe('kimi-pilot');
+      expect(runtime.profileConfig.kimi).toEqual({
+        binaryPath: kimi,
+        defaultModel: 'kimi-code/k3',
+      });
+      expect(saved.profiles['kimi-pilot']).toMatchObject({
+        agentKind: 'kimi',
+        kimi: { binaryPath: kimi, defaultModel: 'kimi-code/k3' },
+        permissions: { defaultAccess: 'read-only', maxAccess: 'read-only' },
+      });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.LARK_CHANNEL_KIMI_BIN;
+      } else {
+        process.env.LARK_CHANNEL_KIMI_BIN = previous;
+      }
+    }
+  });
+
+  it('rejects an overlapping Kimi workspace during the first bootstrap run', async () => {
+    const root = await tmpRoot();
+    const workspaceInsideState = join(root, 'unsafe-workspace');
+    const kimi = await writeExecutable(`${root}-bin`, 'kimi');
+    await mkdir(workspaceInsideState, { recursive: true });
+    const previous = process.env.LARK_CHANNEL_KIMI_BIN;
+    process.env.LARK_CHANNEL_KIMI_BIN = kimi;
+
+    try {
+      await expect(
+        resolveProfileRuntime({
+          config: join(root, 'config.json'),
+          profile: 'kimi',
+          agent: 'kimi',
+          workspace: workspaceInsideState,
+          allowBootstrap: true,
+          appId: 'cli_kimi',
+          appSecret: 'manual-secret',
+          tenant: 'feishu',
+        }),
+      ).rejects.toThrow(/overlaps bridge profile state/i);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.LARK_CHANNEL_KIMI_BIN;
+      } else {
+        process.env.LARK_CHANNEL_KIMI_BIN = previous;
+      }
+    }
+  });
+
+  it('rejects an overlapping Kimi workspace when adding a profile to an existing root', async () => {
+    const root = await tmpRoot();
+    const workspaceInsideState = join(root, 'unsafe-added-profile-workspace');
+    const kimi = await writeExecutable(`${root}-added-profile-bin`, 'kimi');
+    await Promise.all([
+      mkdir(workspaceInsideState, { recursive: true }),
+      writeProfileRoot(root, 'claude', {
+        claude: createDefaultProfileConfig({ agentKind: 'claude', accounts: { app } }),
+      }),
+    ]);
+    const previous = process.env.LARK_CHANNEL_KIMI_BIN;
+    process.env.LARK_CHANNEL_KIMI_BIN = kimi;
+
+    try {
+      await expect(
+        resolveProfileRuntime({
+          config: join(root, 'config.json'),
+          profile: 'kimi-added',
+          agent: 'kimi',
+          workspace: workspaceInsideState,
+          allowBootstrap: true,
+          appId: 'cli_kimi_added',
+          appSecret: 'manual-secret',
+          tenant: 'feishu',
+        }),
+      ).rejects.toThrow(/overlaps bridge profile state/i);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.LARK_CHANNEL_KIMI_BIN;
+      } else {
+        process.env.LARK_CHANNEL_KIMI_BIN = previous;
+      }
+    }
+  });
+
+  it('upgrades existing Kimi profiles to the K3 default model', async () => {
+    const root = await tmpRoot();
+    const kimi = await writeExecutable(join(root, 'bin'), 'kimi');
+    const configPath = join(root, 'config.json');
+    await writeFile(
+      configPath,
+      `${JSON.stringify({
+        schemaVersion: 2,
+        activeProfile: 'kimi',
+        preferences: {},
+        migrations: { permissionDefaultsV1: ['kimi'] },
+        profiles: {
+          kimi: createDefaultProfileConfig({
+            agentKind: 'kimi',
+            accounts: { app },
+            kimi: { binaryPath: kimi },
+          }),
+        },
+      }, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+
+    const runtime = await resolveProfileRuntime({
+      config: configPath,
+      profile: 'kimi',
+      allowBootstrap: false,
+    });
+    const saved = JSON.parse(await readFile(configPath, 'utf8')) as {
+      profiles: Record<string, { kimi?: { defaultModel?: string } }>;
+    };
+
+    expect(runtime.profileConfig.kimi?.defaultModel).toBe('kimi-code/k3');
+    expect(saved.profiles.kimi?.kimi?.defaultModel).toBe('kimi-code/k3');
+  });
+
+  it('canonicalizes and persists Kimi additional workspace roots at startup', async () => {
+    const root = await tmpRoot();
+    const defaultRoot = `${root}-kimi-default`;
+    const secondaryRoot = `${root}-kimi-secondary`;
+    const secondaryAlias = `${root}-kimi-secondary-link`;
+    await Promise.all([
+      mkdir(defaultRoot, { recursive: true }),
+      mkdir(secondaryRoot, { recursive: true }),
+    ]);
+    await symlink(secondaryRoot, secondaryAlias, process.platform === 'win32' ? 'junction' : 'dir');
+    const profile = createDefaultProfileConfig({
+      agentKind: 'kimi',
+      accounts: { app },
+      kimi: { binaryPath: 'kimi', defaultModel: 'kimi-code/k3' },
+    });
+    profile.workspaces = {
+      default: defaultRoot,
+      allowedRoots: [secondaryAlias, secondaryRoot],
+    };
+    await writeProfileRoot(root, 'kimi', { kimi: profile }, {
+      migrations: { permissionDefaultsV1: ['kimi'] },
+    });
+
+    const runtime = await resolveProfileRuntime({ config: join(root, 'config.json') });
+    const saved = JSON.parse(await readFile(join(root, 'config.json'), 'utf8')) as {
+      profiles: Record<string, { workspaces?: { default?: string; allowedRoots?: string[] } }>;
+    };
+
+    expect(runtime.profileConfig.workspaces).toEqual({
+      default: await realpath(defaultRoot),
+      allowedRoots: [await realpath(secondaryRoot)],
+    });
+    expect(saved.profiles.kimi?.workspaces).toEqual(runtime.profileConfig.workspaces);
+  });
+
+  it('fails Kimi startup when an authorized root overlaps bridge profile state', async () => {
+    const root = await tmpRoot();
+    const defaultRoot = `${root}-kimi-default`;
+    const stateWorkspace = join(root, 'state-workspace');
+    await Promise.all([
+      mkdir(defaultRoot, { recursive: true }),
+      mkdir(stateWorkspace, { recursive: true }),
+    ]);
+    const profile = createDefaultProfileConfig({
+      agentKind: 'kimi',
+      accounts: { app },
+      kimi: { binaryPath: 'kimi', defaultModel: 'kimi-code/k3' },
+    });
+    profile.workspaces = {
+      default: defaultRoot,
+      allowedRoots: [stateWorkspace],
+    };
+    await writeProfileRoot(root, 'kimi', { kimi: profile }, {
+      migrations: { permissionDefaultsV1: ['kimi'] },
+    });
+
+    await expect(resolveProfileRuntime({ config: join(root, 'config.json') })).rejects.toThrow(
+      /overlaps bridge profile state/i,
+    );
+  });
+
   it('rejects existing app bootstrap without writing config when credentials are invalid', async () => {
     const root = await tmpRoot();
     const workspace = join(root, 'workspace');
@@ -238,9 +442,11 @@ describe('profile runtime resolver', () => {
     const oldPath = process.env.PATH;
     const oldClaude = process.env.LARK_CHANNEL_CLAUDE_BIN;
     const oldCodex = process.env.LARK_CHANNEL_CODEX_BIN;
+    const oldKimi = process.env.LARK_CHANNEL_KIMI_BIN;
     process.env.PATH = bin;
     delete process.env.LARK_CHANNEL_CLAUDE_BIN;
     delete process.env.LARK_CHANNEL_CODEX_BIN;
+    process.env.LARK_CHANNEL_KIMI_BIN = 'missing-kimi';
 
     try {
       let error: Error | undefined;
@@ -262,7 +468,7 @@ describe('profile runtime resolver', () => {
       expect(message).toContain(claude);
       expect(message).toContain('codex');
       expect(message).toContain(codex);
-      expect(message).toContain('--agent <claude|codex>');
+      expect(message).toContain('--agent <claude|codex|kimi>');
     } finally {
       process.env.PATH = oldPath;
       if (oldClaude === undefined) {
@@ -275,6 +481,11 @@ describe('profile runtime resolver', () => {
       } else {
         process.env.LARK_CHANNEL_CODEX_BIN = oldCodex;
       }
+      if (oldKimi === undefined) {
+        delete process.env.LARK_CHANNEL_KIMI_BIN;
+      } else {
+        process.env.LARK_CHANNEL_KIMI_BIN = oldKimi;
+      }
     }
   });
 
@@ -286,9 +497,11 @@ describe('profile runtime resolver', () => {
     const oldPath = process.env.PATH;
     const oldClaude = process.env.LARK_CHANNEL_CLAUDE_BIN;
     const oldCodex = process.env.LARK_CHANNEL_CODEX_BIN;
+    const oldKimi = process.env.LARK_CHANNEL_KIMI_BIN;
     process.env.PATH = bin;
     delete process.env.LARK_CHANNEL_CLAUDE_BIN;
     delete process.env.LARK_CHANNEL_CODEX_BIN;
+    process.env.LARK_CHANNEL_KIMI_BIN = 'missing-kimi';
 
     try {
       const runtime = await withTty(true, true, () =>
@@ -316,6 +529,11 @@ describe('profile runtime resolver', () => {
         delete process.env.LARK_CHANNEL_CODEX_BIN;
       } else {
         process.env.LARK_CHANNEL_CODEX_BIN = oldCodex;
+      }
+      if (oldKimi === undefined) {
+        delete process.env.LARK_CHANNEL_KIMI_BIN;
+      } else {
+        process.env.LARK_CHANNEL_KIMI_BIN = oldKimi;
       }
     }
   });

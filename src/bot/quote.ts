@@ -5,6 +5,8 @@ import type {
 } from '@larksuite/channel';
 import { normalize } from '@larksuite/channel';
 import { log } from '../core/logger';
+import type { ResourceRequest } from '../media/cache';
+import { resourcesFromFetchedItems } from './forwarded-resources';
 import { expandInteractiveCard } from './interactive-card';
 
 export interface QuotedContext {
@@ -19,6 +21,14 @@ export interface QuotedContext {
    * </forwarded_messages>` (capped at 50 items by the SDK). */
   content: string;
   rawContentType: string;
+  /**
+   * Downloadable resources carried by the quoted message tree, each paired
+   * with the owning message id. Covers a quoted plain `file`/`image` message
+   * (parent) and every sub-message inside a quoted merge_forward — the SDK's
+   * normalize renders those to text but drops the resource descriptors, so
+   * without this the quoted file's bytes never reached the agent.
+   */
+  resources: ResourceRequest[];
 }
 
 /**
@@ -133,6 +143,7 @@ export async function fetchQuotedContext(
       // — substitute the raw JSON so Claude can still see what was quoted.
       content: expandInteractiveCard(normalized.content, parent.body?.content),
       rawContentType: parent.msg_type ?? 'text',
+      resources: resourcesFromFetchedItems(items),
     };
   } catch (err) {
     log.warn('quote', 'normalize-failed', {

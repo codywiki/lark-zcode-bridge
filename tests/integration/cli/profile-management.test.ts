@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -8,7 +8,11 @@ import {
   type AgentKind,
   type RootConfig,
 } from '../../../src/config/profile-schema';
-import { runProfileList, runProfileUse } from '../../../src/cli/commands/profile';
+import {
+  runProfileList,
+  runProfileLogin,
+  runProfileUse,
+} from '../../../src/cli/commands/profile';
 import type { ProcessEntry } from '../../../src/runtime/registry';
 
 const roots: string[] = [];
@@ -77,6 +81,68 @@ describe('profile management commands', () => {
     await expect(readFile(join(root, 'active-profile'), 'utf8')).resolves.toBe('codex-dev\n');
     expect(rootConfig.activeProfile).toBe('codex-dev');
     expect(await readFile(registryFile, 'utf8')).toBe(beforeRegistry);
+  });
+
+  it('logs Kimi in with the selected profile home instead of the global home', async () => {
+    const root = await makeRoot();
+    const profileDir = join(root, 'profiles', 'kimi');
+    const fakeBinary = join(root, 'fake-kimi.cjs');
+    const loginRecord = join(root, 'kimi-login.json');
+    await mkdir(profileDir, { recursive: true });
+    await writeFile(
+      fakeBinary,
+      `#!/usr/bin/env node
+const fs = require('node:fs');
+if (process.argv[2] === 'doctor' && process.argv[3] === 'config') process.exit(0);
+if (process.argv[2] === 'login') {
+  fs.writeFileSync(${JSON.stringify(loginRecord)}, JSON.stringify({
+    cwd: process.cwd(),
+    kimiHome: process.env.KIMI_CODE_HOME,
+    cacheDir: process.env.KIMI_CODE_CACHE_DIR,
+    tempDir: process.env.TMPDIR,
+  }));
+  process.exit(0);
+}
+process.exit(64);
+`,
+      'utf8',
+    );
+    await chmod(fakeBinary, 0o755);
+    const config: RootConfig = {
+      schemaVersion: 2,
+      activeProfile: 'kimi',
+      preferences: {},
+      profiles: {
+        kimi: createDefaultProfileConfig({
+          agentKind: 'kimi',
+          accounts: {
+            app: { id: 'cli_kimi', secret: '${APP_SECRET}', tenant: 'feishu' },
+          },
+          kimi: { binaryPath: fakeBinary },
+        }),
+      },
+    };
+    await writeJson(join(root, 'config.json'), config);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runProfileLogin('kimi', { rootDir: root });
+
+    const record = JSON.parse(await readFile(loginRecord, 'utf8')) as {
+      cwd: string;
+      kimiHome: string;
+      cacheDir: string;
+      tempDir: string;
+    };
+    const kimiHome = join(profileDir, 'kimi-home');
+    expect(record).toEqual({
+      cwd: await realpath(kimiHome),
+      kimiHome,
+      cacheDir: join(kimiHome, 'cache'),
+      tempDir: join(kimiHome, 'tmp'),
+    });
+    expect(await readFile(join(kimiHome, 'config.toml'), 'utf8')).toContain(
+      '# BEGIN LARK CHANNEL BRIDGE KIMI SAFETY',
+    );
   });
 });
 

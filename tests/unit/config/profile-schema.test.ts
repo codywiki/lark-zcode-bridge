@@ -60,6 +60,34 @@ describe('profile schema', () => {
     ).toThrow(/codex/i);
   });
 
+  it('requires Kimi configuration when agentKind is kimi', () => {
+    expect(() =>
+      normalizeProfileConfig({
+        schemaVersion: 2,
+        agentKind: 'kimi',
+        accounts: { app },
+      }),
+    ).toThrow(/kimi\.binaryPath/i);
+  });
+
+  it('normalizes Kimi binary configuration and defaults new profiles to read-only', () => {
+    const cfg = createDefaultProfileConfig({
+      agentKind: 'kimi',
+      accounts: { app },
+      kimi: { binaryPath: '  kimi  ', defaultModel: '  kimi-code/k3  ' },
+    });
+
+    expect(cfg.kimi).toEqual({ binaryPath: 'kimi', defaultModel: 'kimi-code/k3' });
+    expect(cfg.permissions).toEqual({
+      defaultAccess: 'read-only',
+      maxAccess: 'read-only',
+    });
+    expect(cfg.sandbox).toMatchObject({
+      defaultMode: 'read-only',
+      maxMode: 'read-only',
+    });
+  });
+
   it('rejects sandbox defaults that exceed max capability as a permission error', () => {
     expect(() =>
       normalizeProfileConfig({
@@ -115,13 +143,70 @@ describe('profile schema', () => {
     });
   });
 
-  it('normalizes workspaces to a default working directory only', () => {
+  it('defaults workspaces to an empty configuration', () => {
     const cfg = createDefaultProfileConfig({
       agentKind: 'claude',
       accounts: { app },
     });
 
     expect(cfg.workspaces).toEqual({});
+  });
+
+  it('normalizes additional workspace roots without duplicating the default', () => {
+    const cfg = normalizeProfileConfig({
+      schemaVersion: 2,
+      agentKind: 'kimi',
+      accounts: { app },
+      kimi: { binaryPath: 'kimi' },
+      workspaces: {
+        default: '/repo/default',
+        allowedRoots: [
+          '  /repo/secondary  ',
+          '/repo/default',
+          '/repo/secondary',
+          '/repo/third',
+        ],
+      },
+    });
+
+    expect(cfg.workspaces).toEqual({
+      default: '/repo/default',
+      allowedRoots: ['/repo/secondary', '/repo/third'],
+    });
+  });
+
+  it.each([
+    'not-an-array',
+    ['/repo', ''],
+    ['/repo', 42],
+    ['/repo', 'relative/path'],
+  ])('rejects malformed workspace root allowlists: %j', (allowedRoots) => {
+    expect(() =>
+      normalizeProfileConfig({
+        schemaVersion: 2,
+        agentKind: 'kimi',
+        accounts: { app },
+        kimi: { binaryPath: 'kimi' },
+        workspaces: {
+          default: '/repo/default',
+          allowedRoots,
+        },
+      }),
+    ).toThrow(/allowedRoots/i);
+  });
+
+  it('rejects additional workspace roots for non-Kimi profiles', () => {
+    expect(() =>
+      normalizeProfileConfig({
+        schemaVersion: 2,
+        agentKind: 'claude',
+        accounts: { app },
+        workspaces: {
+          default: '/repo/default',
+          allowedRoots: ['/repo/secondary'],
+        },
+      }),
+    ).toThrow(/only for Kimi/i);
   });
 
   it('defaults lark-cli identity to app-only without legacy global source fields', () => {
@@ -286,6 +371,66 @@ describe('profile schema', () => {
     });
 
     expect(cfg.codex?.inheritCodexHome).toBe(false);
+  });
+
+  it('normalizes an absolute shared Codex effort classifier command', () => {
+    const cfg = normalizeProfileConfig({
+      schemaVersion: 2,
+      agentKind: 'codex',
+      accounts: { app },
+      codex: {
+        binaryPath: '/usr/local/bin/codex',
+        router: {
+          enabled: true,
+          classifierCommand: '  /opt/policy/codex-classify-effort  ',
+          classifierArgs: ['--plain'],
+          timeoutMs: 500,
+          fallbackEffort: ' high ',
+        },
+      },
+    });
+
+    expect(cfg.codex?.router).toMatchObject({
+      enabled: true,
+      classifierCommand: '/opt/policy/codex-classify-effort',
+      classifierArgs: ['--plain'],
+      timeoutMs: 500,
+      fallbackEffort: 'high',
+    });
+  });
+
+  it('rejects relative shared Codex effort classifier commands', () => {
+    expect(() =>
+      normalizeProfileConfig({
+        schemaVersion: 2,
+        agentKind: 'codex',
+        accounts: { app },
+        codex: {
+          binaryPath: '/usr/local/bin/codex',
+          router: {
+            enabled: true,
+            classifierCommand: './codex-classify-effort',
+          },
+        },
+      }),
+    ).toThrow(/classifierCommand.*absolute/i);
+  });
+
+  it('rejects unsupported Codex router fallback effort values', () => {
+    expect(() =>
+      normalizeProfileConfig({
+        schemaVersion: 2,
+        agentKind: 'codex',
+        accounts: { app },
+        codex: {
+          binaryPath: '/usr/local/bin/codex',
+          router: {
+            enabled: true,
+            fallbackEffort: 'maximum',
+          },
+        },
+      }),
+    ).toThrow(/fallbackEffort.*low.*ultra/i);
   });
 
   it('defaults Claude permissions to full/full and derives legacy sandbox for runtime compatibility', () => {

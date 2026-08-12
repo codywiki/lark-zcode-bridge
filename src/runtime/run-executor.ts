@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentAdapter, AgentEvent, AgentRun } from '../agent/types';
-import { ActiveRuns, type RunHandle } from '../bot/active-runs';
-import { ProcessPool } from '../bot/process-pool';
+import { ActiveRuns, type RunHandle, type RunStopReason } from '../bot/active-runs';
+import { ProcessPool, ProcessPoolAcquireAborted } from '../bot/process-pool';
 import type { RunPolicyAllow } from '../policy/run-policy';
 import { log } from '../core/logger';
 import { RunRejected, SpawnFailed } from './errors';
+import { trackChild, untrackChild } from './orphan-reaper';
 
 export interface RunExecutorDeps {
   agent: AgentAdapter;
@@ -13,6 +14,8 @@ export interface RunExecutorDeps {
   createRunId?: () => string;
   now?: () => number;
   postDoneExitGraceMs?: number;
+  /** Per-profile state dir used to persist in-flight child pids for orphan reaping. */
+  profileStateDir?: string;
 }
 
 export interface SubmitRunInput {
@@ -21,6 +24,8 @@ export interface SubmitRunInput {
   sessionId?: string;
   threadId?: string;
   model?: string;
+  reasoningEffort?: string;
+  codexConfigOverrides?: readonly string[];
   images?: readonly string[];
   stopGraceMs?: number;
   nowait?: boolean;
@@ -50,6 +55,7 @@ export class RunExecutor {
   private readonly createRunId: () => string;
   private readonly now: () => number;
   private readonly postDoneExitGraceMs: number;
+  private readonly profileStateDir?: string;
 
   constructor(deps: RunExecutorDeps) {
     this.agent = deps.agent;
@@ -58,6 +64,7 @@ export class RunExecutor {
     this.createRunId = deps.createRunId ?? randomUUID;
     this.now = deps.now ?? Date.now;
     this.postDoneExitGraceMs = deps.postDoneExitGraceMs ?? DEFAULT_POST_DONE_EXIT_GRACE_MS;
+    this.profileStateDir = deps.profileStateDir;
   }
 
   async submit(input: SubmitRunInput): Promise<RunExecution> {
@@ -71,15 +78,32 @@ export class RunExecutor {
         this.activeRuns.newRunsPauseReason() ?? 'new runs are temporarily paused',
       );
     }
-    const releaseScope = this.activeRuns.reserve(input.scopeId);
+    const stopBeforeStart = new AbortController();
+    const releaseScope = this.activeRuns.reserve(input.scopeId, () => stopBeforeStart.abort());
     if (!releaseScope) {
       throw new RunRejected('run-already-active', 'another run is already active for this scope');
     }
 
-    const release = input.nowait ? this.pool.tryAcquire() : await this.pool.acquire();
+    let release: (() => void) | undefined;
+    try {
+      release = input.nowait
+        ? this.pool.tryAcquire()
+        : await this.pool.acquire(stopBeforeStart.signal);
+    } catch (err) {
+      releaseScope();
+      if (err instanceof ProcessPoolAcquireAborted || stopBeforeStart.signal.aborted) {
+        throw new RunRejected('run-interrupted', 'run was stopped before it started');
+      }
+      throw err;
+    }
     if (!release) {
       releaseScope();
       throw new RunRejected('pool-full', 'process pool is full');
+    }
+    if (stopBeforeStart.signal.aborted) {
+      release();
+      releaseScope();
+      throw new RunRejected('run-interrupted', 'run was stopped before it started');
     }
     if (this.activeRuns.newRunsPaused()) {
       release();
@@ -100,6 +124,8 @@ export class RunExecutor {
       sessionId: input.sessionId,
       threadId: input.threadId,
       model: input.model,
+      reasoningEffort: input.reasoningEffort,
+      codexConfigOverrides: input.codexConfigOverrides,
       images: input.images,
       sandbox: input.policy.sandbox,
       permissionMode: input.policy.permissionMode,
@@ -111,8 +137,16 @@ export class RunExecutor {
     } catch (err) {
       release();
       releaseScope();
+      if (stopBeforeStart.signal.aborted) {
+        throw new RunRejected('run-interrupted', 'run was stopped before it started');
+      }
       if (err instanceof SpawnFailed) throw err;
       throw new SpawnFailed('agent prepare failed', err, 'agent-prepare-failed');
+    }
+    if (stopBeforeStart.signal.aborted) {
+      release();
+      releaseScope();
+      throw new RunRejected('run-interrupted', 'run was stopped before it started');
     }
     if (this.activeRuns.newRunsPaused()) {
       release();
@@ -128,6 +162,18 @@ export class RunExecutor {
       release();
       releaseScope();
       throw new SpawnFailed('agent spawn failed', err);
+    }
+    // Persist the child's pid so a future bridge instance can reap it if this
+    // one dies ungracefully (SIGKILL / crash) before stopAll() runs.
+    if (this.profileStateDir && typeof run.pid === 'number') {
+      trackChild(this.profileStateDir, {
+        runId,
+        scopeId: input.scopeId,
+        pid: run.pid,
+        bridgePid: process.pid,
+        agentKind: this.agent.id,
+        startedAt: new Date(this.now()).toISOString(),
+      });
     }
     const dimensions = {
       runId,
@@ -145,9 +191,16 @@ export class RunExecutor {
       permissionMode: input.policy.permissionMode,
     });
 
+    let requestStopImpl = async (_reason: RunStopReason = 'interrupted'): Promise<void> => {
+      await run.stop();
+    };
     let handle: RunHandle;
     try {
-      handle = this.activeRuns.register(input.scopeId, run);
+      handle = this.activeRuns.register(
+        input.scopeId,
+        run,
+        (reason) => requestStopImpl(reason),
+      );
     } catch (err) {
       releaseScope();
       release();
@@ -162,30 +215,86 @@ export class RunExecutor {
       if (cleaned) return;
       cleaned = true;
       this.activeRuns.unregister(input.scopeId, run);
+      if (this.profileStateDir && typeof run.pid === 'number') {
+        untrackChild(this.profileStateDir, run.pid);
+      }
       release();
       if (waitForExit) {
-        const exited = await run.waitForExit(this.postDoneExitGraceMs);
-        if (!exited) {
-          log.warn('run', 'post-done-exit-timeout', {
-            ...dimensions,
-            graceMs: this.postDoneExitGraceMs,
-          });
-          await run.stop().catch((err) => {
-            log.warn('run', 'post-done-stop-failed', {
+        try {
+          const exited = await run.waitForExit(this.postDoneExitGraceMs);
+          if (!exited) {
+            log.warn('run', 'post-done-exit-timeout', {
               ...dimensions,
-              err: err instanceof Error ? err.message : String(err),
+              graceMs: this.postDoneExitGraceMs,
             });
+            await run.stop().catch((err) => {
+              log.warn('run', 'post-done-stop-failed', {
+                ...dimensions,
+                err: err instanceof Error ? err.message : String(err),
+              });
+            });
+          }
+        } catch (err) {
+          log.warn('run', 'post-done-wait-failed', {
+            ...dimensions,
+            err: err instanceof Error ? err.message : String(err),
           });
         }
       }
     };
-    const fanout = new EventFanout(observeRunEvents(run.events, {
-      dimensions,
-      startedAt,
-      now: this.now,
-    }), async () => {
-      await cleanup(!handle.interrupted);
-    });
+    let terminalLogged = false;
+    const recordTerminal = (event: AgentEvent): void => {
+      if (terminalLogged || !isTerminalEvent(event)) return;
+      terminalLogged = true;
+      if (event.type === 'done') {
+        log.info('run', 'completed', {
+          ...dimensions,
+          result: event.terminationReason,
+          durationMs: this.now() - startedAt,
+        });
+      } else {
+        log.warn('run', 'failed', {
+          ...dimensions,
+          result: event.terminationReason,
+          durationMs: this.now() - startedAt,
+          error: event.message,
+        });
+      }
+    };
+    const fanout = new EventFanout(
+      run.events,
+      async () => {
+        await cleanup(!handle.interrupted);
+      },
+      recordTerminal,
+    );
+    let stopPromise: Promise<void> | undefined;
+    const requestStop = (reason: RunStopReason = 'interrupted'): Promise<void> => {
+      if (stopPromise) return stopPromise;
+      handle.interrupted = true;
+      fanout.terminate({ type: 'done', terminationReason: reason });
+      stopPromise = (async () => {
+        try {
+          await run.stop();
+          const exited = await run.waitForExit(this.postDoneExitGraceMs);
+          if (!exited) {
+            log.warn('run', 'stop-exit-timeout', {
+              ...dimensions,
+              graceMs: this.postDoneExitGraceMs,
+            });
+          }
+        } catch (err) {
+          log.warn('run', 'stop-failed', {
+            ...dimensions,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        } finally {
+          await cleanup(false);
+        }
+      })();
+      return stopPromise;
+    };
+    requestStopImpl = requestStop;
 
     return {
       runId,
@@ -193,64 +302,37 @@ export class RunExecutor {
       run,
       handle,
       subscribe: () => fanout.subscribe(),
-      stop: async () => {
-        handle.interrupted = true;
-        await run.stop();
-        await run.waitForExit(this.postDoneExitGraceMs);
-        await cleanup(false);
-      },
+      stop: () => requestStop('interrupted'),
     };
   }
 }
 
-function observeRunEvents(
-  events: AsyncIterable<AgentEvent>,
-  opts: {
-    dimensions: Record<string, unknown>;
-    startedAt: number;
-    now: () => number;
-  },
-): AsyncIterable<AgentEvent> {
-  return {
-    async *[Symbol.asyncIterator](): AsyncIterator<AgentEvent> {
-      for await (const event of events) {
-        if (event.type === 'done') {
-          log.info('run', 'completed', {
-            ...opts.dimensions,
-            result: event.terminationReason,
-            durationMs: opts.now() - opts.startedAt,
-          });
-          yield event;
-          return;
-        }
-        if (event.type === 'error') {
-          log.warn('run', 'failed', {
-            ...opts.dimensions,
-            result: event.terminationReason,
-            durationMs: opts.now() - opts.startedAt,
-            error: event.message,
-          });
-          yield event;
-          return;
-        }
-        yield event;
-      }
-    },
-  };
-}
+type TerminalAgentEvent = Extract<AgentEvent, { type: 'done' | 'error' }>;
 
 class EventFanout {
   private readonly source: AsyncIterable<AgentEvent>;
   private readonly onDone: () => Promise<void>;
+  private readonly onTerminal: (event: AgentEvent) => void;
   private readonly buffer: AgentEvent[] = [];
   private readonly waiters = new Set<() => void>();
   private started = false;
   private done = false;
-  private error: unknown;
+  private terminal = false;
 
-  constructor(source: AsyncIterable<AgentEvent>, onDone: () => Promise<void>) {
+  constructor(
+    source: AsyncIterable<AgentEvent>,
+    onDone: () => Promise<void>,
+    onTerminal: (event: AgentEvent) => void,
+  ) {
     this.source = source;
     this.onDone = onDone;
+    this.onTerminal = onTerminal;
+  }
+
+  terminate(event: TerminalAgentEvent): boolean {
+    if (this.terminal) return false;
+    this.publishTerminal(event);
+    return true;
   }
 
   subscribe(): AsyncIterable<AgentEvent> {
@@ -263,7 +345,6 @@ class EventFanout {
             if (index < this.buffer.length) {
               return { done: false, value: this.buffer[index++]! };
             }
-            if (this.error) throw this.error;
             if (this.done) return { done: true, value: undefined };
             await new Promise<void>((resolve) => {
               const wake = (): void => {
@@ -275,7 +356,6 @@ class EventFanout {
             if (index < this.buffer.length) {
               return { done: false, value: this.buffer[index++]! };
             }
-            if (this.error) throw this.error;
             return { done: true, value: undefined };
           },
         };
@@ -284,7 +364,7 @@ class EventFanout {
   }
 
   private start(): void {
-    if (this.started) return;
+    if (this.started || this.done) return;
     this.started = true;
     void this.pump();
   }
@@ -292,17 +372,50 @@ class EventFanout {
   private async pump(): Promise<void> {
     try {
       for await (const event of this.source) {
+        if (this.terminal) break;
+        if (isTerminalEvent(event)) {
+          this.publishTerminal(event);
+          break;
+        }
         this.buffer.push(event);
         this.wakeAll();
-        if (isTerminalEvent(event)) break;
+      }
+      if (!this.terminal) {
+        this.publishTerminal({
+          type: 'error',
+          message: 'agent event stream ended before a terminal event',
+          terminationReason: 'failed',
+        });
       }
     } catch (err) {
-      this.error = err;
+      if (!this.terminal) {
+        const detail = err instanceof Error ? `: ${err.message}` : '';
+        this.publishTerminal({
+          type: 'error',
+          message: `agent event stream failed${detail}`,
+          terminationReason: 'failed',
+        });
+      }
     } finally {
-      await this.onDone();
+      try {
+        await this.onDone();
+      } catch (err) {
+        log.warn('run', 'cleanup-failed', {
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
       this.done = true;
       this.wakeAll();
     }
+  }
+
+  private publishTerminal(event: TerminalAgentEvent): void {
+    if (this.terminal) return;
+    this.terminal = true;
+    this.done = true;
+    this.buffer.push(event);
+    this.onTerminal(event);
+    this.wakeAll();
   }
 
   private wakeAll(): void {
@@ -310,6 +423,6 @@ class EventFanout {
   }
 }
 
-function isTerminalEvent(event: AgentEvent): boolean {
+function isTerminalEvent(event: AgentEvent): event is TerminalAgentEvent {
   return event.type === 'done' || event.type === 'error';
 }

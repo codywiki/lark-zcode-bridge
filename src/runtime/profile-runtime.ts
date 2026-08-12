@@ -1,10 +1,12 @@
 import { mkdir, readFile, realpath } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import * as p from '@clack/prompts';
 import { runRegistrationWizard } from '../bot/wizard';
+import { KIMI_DEFAULT_MODEL } from '../agent/kimi/models';
 import { detectInstalledAgents, type DetectedAgent } from '../cli/agent-detection';
 import {
   createBootstrapCodexConfig,
+  createBootstrapKimiConfig,
   createBootstrapProfileConfig,
   resolveBootstrapWorkspace,
 } from '../cli/profile-bootstrap';
@@ -46,6 +48,7 @@ import {
   saveConfig,
 } from '../config/store';
 import { log } from '../core/logger';
+import { allowedWorkspaceRoots, resolveWorkingDirectory } from '../policy/workspace';
 import {
   hasLegacyLarkCliSourceOverlay,
   recoverLegacyLarkCliSourceOverlay,
@@ -90,6 +93,14 @@ export function createRuntimeProfileConfig(
     ...(input.agentKind === 'codex'
       ? { codex: input.codex ?? { binaryPath: process.env.LARK_CHANNEL_CODEX_BIN ?? 'codex' } }
       : {}),
+    ...(input.agentKind === 'kimi'
+      ? {
+          kimi: input.kimi ?? {
+            binaryPath: process.env.LARK_CHANNEL_KIMI_BIN ?? 'kimi',
+            defaultModel: KIMI_DEFAULT_MODEL,
+          },
+        }
+      : {}),
   });
 }
 
@@ -108,7 +119,7 @@ export async function resolveProfileRuntime(
   if (!profile && opts.allowBootstrap) {
     const detected = await detectInstalledAgents();
     if (detected.length === 0) {
-      throw new Error('no supported local agent found; install claude or codex first');
+      throw new Error('no supported local agent found; install claude, codex, or kimi first');
     }
     if (detected.length > 1) {
       const selected = await selectDetectedAgent(detected, opts.selectAgent);
@@ -137,6 +148,9 @@ export async function resolveProfileRuntime(
     ...(migrationAgent ? { agentKind: migrationAgent } : {}),
     ...(needsMigration && migrationAgent === 'codex'
       ? { codex: await createBootstrapCodexConfig(undefined) }
+      : {}),
+    ...(needsMigration && migrationAgent === 'kimi'
+      ? { kimi: await createBootstrapKimiConfig(undefined) }
       : {}),
   }, opts.handleActiveBridgeMigrationConflict);
 
@@ -169,14 +183,28 @@ export async function resolveProfileRuntime(
     if (defaultWorkspaceUpgrade.changed) {
       rootConfig = defaultWorkspaceUpgrade.rootConfig;
     }
-    if (runtimeUpgrade.changed || defaultWorkspaceUpgrade.changed) {
+    const workspaceRootsUpgrade = await ensureCanonicalKimiWorkspaceRoots(
+      rootConfig,
+      profile,
+      appPaths,
+    );
+    if (workspaceRootsUpgrade.changed) {
+      rootConfig = workspaceRootsUpgrade.rootConfig;
+    }
+    if (
+      runtimeUpgrade.changed ||
+      defaultWorkspaceUpgrade.changed ||
+      workspaceRootsUpgrade.changed
+    ) {
       await saveRootConfig(rootConfig, configPath);
       profileConfig = rootConfig.profiles[profile]!;
       log.info('profile', 'legacy-runtime-defaults-upgraded', {
         profile,
         permissions: runtimeUpgrade.permissions,
         codex: runtimeUpgrade.codex,
+        kimi: runtimeUpgrade.kimi,
         workspace: defaultWorkspaceUpgrade.changed,
+        workspaceRoots: workspaceRootsUpgrade.changed,
       });
     }
     assertBootstrapAppMatchesExistingProfile(opts, profile, profileConfig);
@@ -195,10 +223,17 @@ export async function resolveProfileRuntime(
       secrets: cfg.secrets,
     });
     profileConfig.workspaces.default = await resolveConvertedLegacyDefaultWorkspace(opts, appPaths);
-    const root = createRootConfig(profile, profileConfig, cfg.secrets);
+    const createdRoot = createRootConfig(profile, profileConfig, cfg.secrets);
+    const root = (await ensureCanonicalKimiWorkspaceRoots(createdRoot, profile, appPaths)).rootConfig;
     await saveRootConfig(root, configPath);
     await writeActiveProfile(appPaths.rootDir, profile);
-    return { cfg: runtimeProfileConfig(root, profile), profileConfig, configPath, appPaths, profile };
+    return {
+      cfg: runtimeProfileConfig(root, profile),
+      profileConfig: root.profiles[profile]!,
+      configPath,
+      appPaths,
+      profile,
+    };
   }
 
   if (!opts.allowBootstrap) {
@@ -217,11 +252,18 @@ export async function resolveProfileRuntime(
     defaultWorkspace: appPaths.defaultWorkspaceDir,
     profileDir: appPaths.profileDir,
   });
-  const root = createRootConfig(profile, profileConfig, encrypted.secrets);
+  const createdRoot = createRootConfig(profile, profileConfig, encrypted.secrets);
+  const root = (await ensureCanonicalKimiWorkspaceRoots(createdRoot, profile, appPaths)).rootConfig;
   await saveRootConfig(root, configPath);
   await writeActiveProfile(appPaths.rootDir, profile);
   console.log(`配置已保存到 ${configPath}\n`);
-  return { cfg: runtimeProfileConfig(root, profile), profileConfig, configPath, appPaths, profile };
+  return {
+    cfg: runtimeProfileConfig(root, profile),
+    profileConfig: root.profiles[profile]!,
+    configPath,
+    appPaths,
+    profile,
+  };
 }
 
 async function bootstrapProfileIntoExistingRoot(args: {
@@ -259,11 +301,15 @@ async function bootstrapProfileIntoExistingRoot(args: {
       },
     },
   };
-  await saveRootConfig(markPermissionDefaultsMigration(nextRoot, profile), configPath);
+  const canonicalRoot = (
+    await ensureCanonicalKimiWorkspaceRoots(nextRoot, profile, appPaths)
+  ).rootConfig;
+  const storedRoot = markPermissionDefaultsMigration(canonicalRoot, profile);
+  await saveRootConfig(storedRoot, configPath);
   console.log(`配置已保存到 ${configPath}\n`);
   return {
-    cfg: runtimeProfileConfig(nextRoot, profile),
-    profileConfig,
+    cfg: runtimeProfileConfig(storedRoot, profile),
+    profileConfig: storedRoot.profiles[profile]!,
     configPath,
     appPaths,
     profile,
@@ -273,10 +319,10 @@ async function bootstrapProfileIntoExistingRoot(args: {
 function upgradeLegacyRuntimeDefaults(
   rootConfig: RootConfig,
   profile: string,
-): { rootConfig: RootConfig; changed: boolean; permissions: boolean; codex: boolean } {
+): { rootConfig: RootConfig; changed: boolean; permissions: boolean; codex: boolean; kimi: boolean } {
   const profileConfig = rootConfig.profiles[profile];
   if (!profileConfig) {
-    return { rootConfig, changed: false, permissions: false, codex: false };
+    return { rootConfig, changed: false, permissions: false, codex: false, kimi: false };
   }
 
   const permissionDefaultsMigrated = hasPermissionDefaultsMigration(rootConfig, profile);
@@ -303,11 +349,16 @@ function upgradeLegacyRuntimeDefaults(
     Boolean(profileConfig.codex) &&
     !profileConfig.codex?.codexHome &&
     profileConfig.codex?.ignoreUserConfig === true;
+  const legacyKimiDefaultModel =
+    profileConfig.agentKind === 'kimi' &&
+    Boolean(profileConfig.kimi) &&
+    !profileConfig.kimi?.defaultModel;
   const permissionsChanged = legacySandboxPolicy || shouldUpgradeClaudeDefaultPermissions;
   const permissionDefaultsMarkerChanged = !permissionDefaultsMigrated;
   const codexChanged = legacyIsolatedCodexHome || legacyIgnoredUserConfig;
-  if (!permissionsChanged && !codexChanged && !permissionDefaultsMarkerChanged) {
-    return { rootConfig, changed: false, permissions: false, codex: false };
+  const kimiChanged = legacyKimiDefaultModel;
+  if (!permissionsChanged && !codexChanged && !kimiChanged && !permissionDefaultsMarkerChanged) {
+    return { rootConfig, changed: false, permissions: false, codex: false, kimi: false };
   }
 
   const nextProfile: ProfileConfig = {
@@ -328,6 +379,14 @@ function upgradeLegacyRuntimeDefaults(
           },
         }
       : {}),
+    ...(profileConfig.kimi
+      ? {
+          kimi: {
+            ...profileConfig.kimi,
+            ...(legacyKimiDefaultModel ? { defaultModel: KIMI_DEFAULT_MODEL } : {}),
+          },
+        }
+      : {}),
   };
 
   const nextRoot = {
@@ -342,6 +401,7 @@ function upgradeLegacyRuntimeDefaults(
     changed: true,
     permissions: permissionsChanged,
     codex: codexChanged,
+    kimi: kimiChanged,
     rootConfig: permissionDefaultsMarkerChanged
       ? markPermissionDefaultsMigration(nextRoot, profile)
       : nextRoot,
@@ -380,6 +440,82 @@ async function ensureProfileDefaultWorkspace(
   };
 }
 
+async function ensureCanonicalKimiWorkspaceRoots(
+  rootConfig: RootConfig,
+  profile: string,
+  appPaths: AppPaths,
+): Promise<{ rootConfig: RootConfig; changed: boolean }> {
+  const profileConfig = rootConfig.profiles[profile];
+  if (!profileConfig || profileConfig.agentKind !== 'kimi') {
+    return { rootConfig, changed: false };
+  }
+
+  const configuredRoots = allowedWorkspaceRoots(profileConfig.workspaces);
+  if (configuredRoots.length === 0 || !profileConfig.workspaces.default) {
+    throw new Error('Kimi profile requires a default authorized workspace root');
+  }
+
+  const stateRoot = await realpath(appPaths.rootDir).catch(() => resolve(appPaths.rootDir));
+  const canonicalRoots: string[] = [];
+  const seen = new Set<string>();
+  for (const configuredRoot of configuredRoots) {
+    const resolvedRoot = await resolveWorkingDirectory(configuredRoot);
+    if (!resolvedRoot.ok) {
+      throw new Error(`Kimi workspace authorization root rejected (${resolvedRoot.reason})`);
+    }
+    if (pathsOverlap(resolvedRoot.cwdRealpath, stateRoot)) {
+      throw new Error('Kimi workspace authorization root overlaps bridge profile state');
+    }
+    if (seen.has(resolvedRoot.cwdRealpath)) continue;
+    seen.add(resolvedRoot.cwdRealpath);
+    canonicalRoots.push(resolvedRoot.cwdRealpath);
+  }
+
+  const defaultRoot = canonicalRoots[0];
+  if (!defaultRoot) {
+    throw new Error('Kimi profile requires a valid default authorized workspace root');
+  }
+  const allowedRoots = canonicalRoots.slice(1);
+  const nextWorkspaces: ProfileConfig['workspaces'] = {
+    default: defaultRoot,
+    ...(allowedRoots.length > 0 ? { allowedRoots } : {}),
+  };
+  const changed =
+    profileConfig.workspaces.default !== nextWorkspaces.default ||
+    !sameStrings(profileConfig.workspaces.allowedRoots ?? [], allowedRoots);
+  if (!changed) return { rootConfig, changed: false };
+
+  return {
+    changed: true,
+    rootConfig: {
+      ...rootConfig,
+      profiles: {
+        ...rootConfig.profiles,
+        [profile]: {
+          ...profileConfig,
+          workspaces: nextWorkspaces,
+        },
+      },
+    },
+  };
+}
+
+function pathsOverlap(left: string, right: string): boolean {
+  return containsPath(left, right) || containsPath(right, left);
+}
+
+function containsPath(root: string, candidate: string): boolean {
+  const fromRoot = relative(root, candidate);
+  return (
+    fromRoot === '' ||
+    (fromRoot !== '..' && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot))
+  );
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
 async function resolveConvertedLegacyDefaultWorkspace(
   opts: ResolveProfileRuntimeOptions,
   appPaths: AppPaths,
@@ -395,7 +531,7 @@ function resolveBootstrapAgent(
   requestedAgent: AgentKind | undefined,
   profile: string | undefined,
 ): AgentKind | undefined {
-  return requestedAgent ?? (profile === 'codex' ? 'codex' : undefined);
+  return requestedAgent ?? (profile === 'codex' || profile === 'kimi' ? profile : undefined);
 }
 
 async function hasLegacyConfig(configPath: string): Promise<boolean> {
@@ -568,7 +704,7 @@ function formatAmbiguousAgentSelectionError(
 ): string {
   const lines = detected.map((agent) => `  - ${agent.kind}: ${agent.binaryPath}`);
   return [
-    '检测到多个本地 agent，请使用 --agent <claude|codex> 指定要初始化哪一个。',
+    '检测到多个本地 agent，请使用 --agent <claude|codex|kimi> 指定要初始化哪一个。',
     '已检测到：',
     ...lines,
   ].join('\n');
@@ -613,7 +749,14 @@ class UserCancelledError extends Error {
 }
 
 function displayAgentKind(kind: AgentKind): string {
-  return kind === 'claude' ? 'Claude Code' : 'Codex CLI';
+  switch (kind) {
+    case 'claude':
+      return 'Claude Code';
+    case 'codex':
+      return 'Codex CLI';
+    case 'kimi':
+      return 'Kimi Code CLI';
+  }
 }
 
 async function maybeMigrateRootPlaintextSecret(

@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
+import { prepareKimiProfileHome } from '../../agent/kimi/profile-home';
 import { resolveAppPaths } from '../../config/app-paths';
 import { paths } from '../../config/paths';
 import {
@@ -18,6 +19,7 @@ import {
 import type { RootConfig } from '../../config/profile-schema';
 import { resolveAppSecret } from '../../config/secret-resolver';
 import { writeFileAtomic } from '../../platform/atomic-write';
+import { mergeProcessEnv, spawnProcess } from '../../platform/spawn';
 import { acquireProfileRuntimeLock, checkRuntimeLock } from '../../runtime/locks';
 import { readAndPrune } from '../../runtime/registry';
 import { listAllProfiles } from '../../runtime/profile-discovery';
@@ -150,6 +152,69 @@ export async function runProfileUse(
     await writeActiveProfile(rootDir, name);
   });
   console.log(`已切换到 profile: ${name}`);
+}
+
+export async function runProfileLogin(
+  name: string,
+  opts: ProfileCommandOptions = {},
+): Promise<void> {
+  const rootDir = opts.rootDir ?? paths.rootDir;
+  const configFile = resolveAppPaths({ rootDir }).configFile;
+  const root = await loadRootConfig(configFile);
+  if (!root) throw new Error('config not initialized');
+  const profile = root.profiles[name];
+  if (!profile) throw new Error(`profile not found: ${name}`);
+  if (profile.agentKind !== 'kimi' || !profile.kimi?.binaryPath) {
+    throw new Error(`profile login currently supports Kimi profiles only: ${name}`);
+  }
+
+  const profilePaths = resolveAppPaths({ rootDir, profile: name });
+  const runtimeLock = await checkRuntimeLock(profilePaths.profileLockFile);
+  if (runtimeLock.locked) {
+    const holder = runtimeLock.meta ? ` pid=${runtimeLock.meta.pid}` : '';
+    throw new Error(`stop the running profile before login: ${name}${holder}`);
+  }
+
+  const lock = await acquireProfileRuntimeLock(profilePaths, 'kimi');
+  try {
+    const prepared = prepareKimiProfileHome(profile.kimi.binaryPath, profilePaths.profileDir);
+    console.log(`正在为 Kimi profile \`${name}\` 授权；请按终端提示完成登录。`);
+    await runInteractiveProcess(profile.kimi.binaryPath, ['login'], {
+      cwd: prepared.homeDir,
+      env: mergeProcessEnv(process.env, prepared.env),
+    });
+    console.log(`Kimi profile \`${name}\` 已完成登录。`);
+  } finally {
+    await lock.release().catch(() => {});
+  }
+}
+
+async function runInteractiveProcess(
+  command: string,
+  args: readonly string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv },
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawnProcess(command, args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: 'inherit',
+    });
+    child.once('error', reject);
+    child.once('exit', (code, signal) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(
+        new Error(
+          signal
+            ? `Kimi login terminated by ${signal}`
+            : `Kimi login exited with code ${String(code)}`,
+        ),
+      );
+    });
+  });
 }
 
 export async function runProfileRemove(

@@ -50,6 +50,10 @@ export interface BridgePromptAttachment {
   hash?: string;
   size?: number;
   mime?: string;
+  /** Sender-visible filename (e.g. `aifuye-demo.html`) — lets the agent map a
+   * downloaded attachment back to the `<file name="…"/>` reference inside a
+   * forwarded/quoted text block. */
+  originalName?: string;
   sourceMessageId?: string;
   requiredness?: 'required' | 'optional';
   decision?: 'accepted' | 'rejected' | 'skipped';

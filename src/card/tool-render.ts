@@ -1,6 +1,12 @@
 import type { ToolEntry } from './run-state';
 
 const HEADER_SUMMARY_MAX = 80;
+/**
+ * Paths get a tighter budget than free text: they are the most common summary
+ * and the least informative per character, so a full repo path would crowd out
+ * everything else on the line.
+ */
+const PATH_SUMMARY_MAX = 44;
 const BODY_FIELD_MAX = 600;
 const OUTPUT_MAX = 1200;
 /**
@@ -12,10 +18,19 @@ const OUTPUT_MAX = 1200;
  */
 const BODY_TOTAL_MAX = 2500;
 
+/**
+ * Header line for a tool call.
+ *
+ * Only failure is marked. A per-tool ✅/⏳ carries no information the user acts
+ * on — success is the default and "running" is already implied by the card's
+ * own footer — while a column of glyphs is what makes a long run read as
+ * noise. Errors keep a marker because they are the one status worth spotting
+ * at a glance.
+ */
 export function toolHeaderText(tool: ToolEntry): string {
-  const icon = tool.status === 'done' ? '✅' : tool.status === 'error' ? '❌' : '⏳';
+  const prefix = tool.status === 'error' ? '⚠️ ' : '';
   const summary = summarizeInput(tool.name, tool.input);
-  return summary ? `${icon} **${tool.name}** — ${summary}` : `${icon} **${tool.name}**`;
+  return summary ? `${prefix}**${tool.name}** — ${summary}` : `${prefix}**${tool.name}**`;
 }
 
 export function toolBodyMd(tool: ToolEntry): string {
@@ -44,24 +59,28 @@ export function toolBodyMd(tool: ToolEntry): string {
 function summarizeInput(name: string, input: unknown): string {
   if (!input || typeof input !== 'object') return '';
   const rec = input as Record<string, unknown>;
-  const pick = (key: string, max = HEADER_SUMMARY_MAX): string => {
+  const raw = (key: string): string => {
     const v = rec[key];
-    if (typeof v !== 'string') return '';
-    const oneLine = v.replace(/\s+/g, ' ').trim();
-    return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
+    return typeof v === 'string' ? v.replace(/\s+/g, ' ').trim() : '';
   };
+  const pick = (key: string, max = HEADER_SUMMARY_MAX): string => truncate(raw(key), max);
+  // Paths are shortened before the length cap, not after: truncating first
+  // would cut the filename off the end and leave only the shared prefix.
+  const path = (key: string): string => truncate(shortenPath(raw(key)), HEADER_SUMMARY_MAX);
+
   switch (name) {
     case 'Bash':
-      return pick('command');
+    case 'command_execution':
+      return truncate(summarizeCommand(raw('command')), HEADER_SUMMARY_MAX);
     case 'Read':
     case 'Edit':
     case 'Write':
     case 'NotebookEdit':
-      return shortenPath(pick('file_path'));
+      return path('file_path');
     case 'Grep': {
       const pat = pick('pattern', 40);
-      const path = pick('path', 30);
-      return path ? `${pat} in ${shortenPath(path)}` : pat;
+      const where = path('path');
+      return where ? `${pat} in ${where}` : pat;
     }
     case 'Glob':
       return pick('pattern');
@@ -73,8 +92,31 @@ function summarizeInput(name: string, input: unknown): string {
     case 'Task':
       return pick('description') || pick('subagent_type');
     default:
-      return pick('command') || pick('file_path') || pick('path') || pick('query');
+      return pick('command') || path('file_path') || path('path') || pick('query');
   }
+}
+
+/**
+ * The informative part of a shell command line.
+ *
+ * Real commands arrive wrapped in navigation and noise — `cd /long/path &&
+ * grep …`, `echo "=== header ===" ; ls`. The wrapper is identical across
+ * calls, so showing it spends the line on the one part that never varies.
+ * This drops leading `cd`, and prefers the first segment that isn't just an
+ * `echo` banner, falling back to the original when every segment is noise.
+ */
+function summarizeCommand(command: string): string {
+  if (!command) return '';
+  const segments = command.split(/&&|[;\n]/).map((s) => s.trim()).filter(Boolean);
+  const meaningful = segments.filter((segment) => {
+    const program = segment.split(/\s+/)[0] ?? '';
+    return program !== 'cd' && program !== 'echo';
+  });
+  const chosen = meaningful[0] ?? segments[0] ?? command;
+  // Trailing "…" means a real command was left out. Dropped `cd`/`echo`
+  // boilerplate does not count: it carried nothing, so flagging it would imply
+  // hidden work that never happened.
+  return meaningful.length > 1 ? `${chosen} …` : chosen;
 }
 
 function renderInput(tool: ToolEntry): string {
@@ -115,8 +157,30 @@ function renderBashOutput(out: string): string {
   return `**Output**\n\`\`\`\n${out}\n\`\`\``;
 }
 
+/**
+ * Shorten a path for a one-line header, keeping the part that identifies the
+ * file. An absolute path into a deep repo is mostly prefix the reader already
+ * knows; the filename and its immediate parent are what distinguish this call
+ * from the next one, so long paths keep the tail and lose the middle.
+ *
+ * The home directory collapses to `~` because that prefix is on nearly every
+ * path here. Full paths remain in the tool body and the file log — this only
+ * governs the summary line.
+ */
 function shortenPath(p: string): string {
-  return p;
+  if (!p) return p;
+  const home = process.env.HOME;
+  const withTilde = home && p.startsWith(`${home}/`) ? `~${p.slice(home.length)}` : p;
+  if (withTilde.length <= PATH_SUMMARY_MAX) return withTilde;
+
+  const segments = withTilde.split('/');
+  const tail = segments.slice(-2).join('/');
+  const head = segments[0] === '~' || segments[0] === '' ? segments[0] || '' : '';
+  const shortened = head ? `${head}/…/${tail}` : `…/${tail}`;
+  // A single very long segment (no separators to cut on) still needs bounding.
+  return shortened.length <= PATH_SUMMARY_MAX
+    ? shortened
+    : `…${withTilde.slice(-(PATH_SUMMARY_MAX - 1))}`;
 }
 
 function truncate(s: string, max: number): string {

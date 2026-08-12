@@ -1,6 +1,6 @@
 import { spawnProcess } from '../platform/spawn';
 
-export type LocalAgentId = 'claude' | 'codex';
+export type LocalAgentId = 'claude' | 'codex' | 'kimi';
 
 export type AgentPreflightErrorCode =
   | 'agent-binary-not-found'
@@ -11,7 +11,8 @@ export type AgentPreflightErrorCode =
   | 'agent-version-check-timeout'
   | 'agent-version-check-signaled'
   | 'agent-version-check-nonzero-exit'
-  | 'agent-version-check-empty-output';
+  | 'agent-version-check-empty-output'
+  | 'agent-version-check-unsupported-version';
 
 export interface AgentPreflightDiagnostic {
   code: AgentPreflightErrorCode;
@@ -262,6 +263,15 @@ export function formatAgentPreflightDiagnostic(diagnostic: AgentPreflightDiagnos
         `请确认安装的是受支持的 ${diagnostic.agentName}。`,
         `错误码：${diagnostic.code}`,
       ].join('\n');
+    case 'agent-version-check-unsupported-version':
+      return [
+        `✗ 本地 ${diagnostic.agentName} 版本不在当前安全试点允许范围内。`,
+        '',
+        `当前版本：${diagnostic.actual ?? 'unknown'}`,
+        `允许版本：${diagnostic.expected ?? 'unknown'}`,
+        '请安装允许版本后重新启动 bridge；不要绕过版本检查。',
+        `错误码：${diagnostic.code}`,
+      ].join('\n');
   }
 }
 
@@ -279,7 +289,7 @@ export function isAgentPreflightDiagnostic(input: unknown): input is AgentPrefli
   return (
     typeof raw.code === 'string' &&
     raw.code.startsWith('agent-') &&
-    (raw.agentId === 'claude' || raw.agentId === 'codex') &&
+    (raw.agentId === 'claude' || raw.agentId === 'codex' || raw.agentId === 'kimi') &&
     typeof raw.agentName === 'string' &&
     typeof raw.command === 'string'
   );

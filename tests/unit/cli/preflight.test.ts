@@ -45,8 +45,13 @@ vi.mock('../../../src/platform/atomic-write', async () => {
 });
 
 vi.mock('../../../src/platform/spawn', () => ({
+  // Keep this unit suite independent of the bridge-bound environment used to
+  // launch Vitest. Environment merge behavior has dedicated platform tests;
+  // preflight assertions only need the overrides assembled by this module.
   mergeProcessEnv: (base: NodeJS.ProcessEnv, overrides: NodeJS.ProcessEnv) => ({
-    ...base,
+    HOME: base.HOME,
+    PATH: base.PATH,
+    LANG: base.LANG,
     ...overrides,
   }),
   spawnProcess: mocks.spawnProcess,

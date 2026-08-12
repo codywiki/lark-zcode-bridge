@@ -3,9 +3,11 @@ import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
+import { log } from '../../../src/core/logger.js';
+import { SessionCatalog } from '../../../src/session/catalog.js';
 import { SessionStore } from '../../../src/session/store.js';
 import { WorkspaceStore } from '../../../src/workspace/store.js';
-import { FakeAgentAdapter } from '../../helpers/fake-agent.js';
+import { FakeAgentAdapter, type FakeAgentEvents } from '../../helpers/fake-agent.js';
 import { createTmpProfile, type TmpProfile } from '../../helpers/tmp-profile.js';
 
 const sdkMock = vi.hoisted(() => ({
@@ -146,24 +148,105 @@ describe('topic message quote handling', () => {
       expect.objectContaining({ cardContentType: 'user_card_content' }),
     );
   });
+
+  it('keeps Kimi session resume isolated to each topic thread', async () => {
+    const info = vi.spyOn(log, 'info');
+    const h = await createHarness({
+      agentKind: 'kimi',
+      agentEvents: [
+        [
+          { type: 'system', sessionId: 'kimi-session-a' },
+          { type: 'done', sessionId: 'kimi-session-a', terminationReason: 'normal' },
+        ],
+        [
+          { type: 'system', sessionId: 'kimi-session-b' },
+          { type: 'done', sessionId: 'kimi-session-b', terminationReason: 'normal' },
+        ],
+        [{ type: 'done', sessionId: 'kimi-session-a', terminationReason: 'normal' }],
+      ],
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_topic_a_1',
+        rootId: 'om_topic_a_root',
+        parentId: 'om_topic_a_root',
+        threadId: 'omt_topic_a',
+        content: '@Bridge topic A',
+      }),
+    );
+    await waitFor(
+      () =>
+        h.sessions.resumeFor('oc_topic_chat:omt_topic_a', h.workspace) === 'kimi-session-a',
+    );
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_topic_b_1',
+        rootId: 'om_topic_b_root',
+        parentId: 'om_topic_b_root',
+        threadId: 'omt_topic_b',
+        content: '@Bridge topic B',
+      }),
+    );
+    await waitFor(
+      () =>
+        h.sessions.resumeFor('oc_topic_chat:omt_topic_b', h.workspace) === 'kimi-session-b',
+    );
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_topic_a_2',
+        rootId: 'om_topic_a_root',
+        parentId: 'om_topic_a_root',
+        threadId: 'omt_topic_a',
+        content: '@Bridge continue topic A',
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 3);
+
+    expect(h.agent.runOptions[0]).toMatchObject({ sessionId: undefined });
+    expect(h.agent.runOptions[0]?.prompt).toContain('"threadId":"omt_topic_a"');
+    expect(h.agent.runOptions[1]).toMatchObject({ sessionId: undefined });
+    expect(h.agent.runOptions[1]?.prompt).toContain('"threadId":"omt_topic_b"');
+    expect(h.agent.runOptions[2]).toMatchObject({ sessionId: 'kimi-session-a' });
+    expect(h.agent.runOptions[2]?.prompt).toContain('"threadId":"omt_topic_a"');
+    const sessionLogs = info.mock.calls.filter(([phase]) => phase === 'session');
+    expect(sessionLogs).toContainEqual([
+      'session',
+      'resume',
+      { agent: 'kimi', hasSession: true },
+    ]);
+    expect(sessionLogs).toContainEqual([
+      'session',
+      'set',
+      { agent: 'kimi', hasSession: true },
+    ]);
+    expect(JSON.stringify(sessionLogs)).not.toMatch(/kimi-session-[ab]|omt_topic_[ab]/);
+  });
 });
 
 async function createHarness(options: {
   chatMode?: 'group' | 'topic';
   quotedMessages?: Record<string, string>;
+  agentKind?: 'claude' | 'kimi';
+  agentEvents?: FakeAgentEvents;
 } = {}): Promise<{
   tmp: TmpProfile;
   channel: FakeLarkChannel & { handlers: MessageHandlerMap };
   agent: FakeAgentAdapter;
   sessions: SessionStore;
+  sessionCatalog: SessionCatalog;
   workspaces: WorkspaceStore;
+  workspace: string;
   profileConfig: ReturnType<typeof createDefaultProfileConfig>;
   controls: ReturnType<typeof createControls>;
 }> {
   const tmp = await createTmpProfile('topic-quote-');
   const workspace = await realpath(tmp.workspace);
   const baseProfileConfig = createDefaultProfileConfig({
-    agentKind: 'claude',
+    agentKind: options.agentKind ?? 'claude',
     accounts: {
       app: {
         id: 'cli_test',
@@ -175,6 +258,7 @@ async function createHarness(options: {
       allowedChats: ['oc_topic_chat'],
       allowedUsers: ['ou_user'],
     },
+    ...(options.agentKind === 'kimi' ? { kimi: { binaryPath: 'kimi' } } : {}),
   });
   const profileConfig = {
     ...baseProfileConfig,
@@ -184,15 +268,17 @@ async function createHarness(options: {
     },
   };
   const sessions = new SessionStore(join(tmp.profile, 'sessions.json'));
+  const sessionCatalog = new SessionCatalog(join(tmp.profile, 'session-catalog.json'));
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
   const agent = new FakeAgentAdapter({
-    events: [{ type: 'done', terminationReason: 'normal' }],
+    id: options.agentKind ?? 'claude',
+    events: options.agentEvents ?? [{ type: 'done', terminationReason: 'normal' }],
   });
   const channel = createFakeLarkChannel(options);
   sdkMock.channel = channel;
   const controls = createControls(profileConfig);
   cleanups.push(async () => {
-    await Promise.all([sessions.flush(), workspaces.flush()]);
+    await Promise.all([sessions.flush(), sessionCatalog.flush(), workspaces.flush()]);
     await tmp.cleanup();
   });
   return {
@@ -200,7 +286,9 @@ async function createHarness(options: {
     channel,
     agent,
     sessions,
+    sessionCatalog,
     workspaces,
+    workspace,
     profileConfig,
     controls,
   };
@@ -210,6 +298,7 @@ async function startTestBridge(h: {
   profileConfig: ReturnType<typeof createDefaultProfileConfig>;
   agent: FakeAgentAdapter;
   sessions: SessionStore;
+  sessionCatalog: SessionCatalog;
   workspaces: WorkspaceStore;
   controls: ReturnType<typeof createControls>;
 }): Promise<void> {
@@ -217,6 +306,7 @@ async function startTestBridge(h: {
     cfg: h.profileConfig,
     agent: h.agent,
     sessions: h.sessions,
+    sessionCatalog: h.sessionCatalog,
     workspaces: h.workspaces,
     controls: h.controls,
   });

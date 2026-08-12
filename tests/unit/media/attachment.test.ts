@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  extensionFromFileName,
   normalizeAttachments,
   safeExtensionForMime,
+  toPromptAttachment,
   type AttachmentCandidate,
 } from '../../../src/media/attachment.js';
 
@@ -79,6 +81,28 @@ describe('attachment policy normalization', () => {
       '',
       'too-many-attachments',
     ]);
+  });
+
+  it('recovers a conservative extension from filenames only as a bin fallback', () => {
+    expect(extensionFromFileName('aifuye-demo.html')).toBe('html');
+    expect(extensionFromFileName('季度报告.docx')).toBe('docx');
+    expect(extensionFromFileName('archive.TAR.GZ')).toBe('gz');
+    expect(extensionFromFileName('no-extension')).toBeUndefined();
+    expect(extensionFromFileName('trailing.')).toBeUndefined();
+    expect(extensionFromFileName('../../etc/passwd')).toBeUndefined();
+    expect(extensionFromFileName('weird name!.exe ')).toBe('exe');
+    // Way over the 10-char cap — not an extension.
+    expect(extensionFromFileName('x.superlongextension')).toBeUndefined();
+  });
+
+  it('passes the original filename through to prompt attachments', () => {
+    const [normalized] = normalizeAttachments([
+      candidate({ kind: 'file', mime: 'text/html', hash: 'h1', originalName: 'aifuye-demo.html' }),
+    ]);
+    const prompt = toPromptAttachment(normalized!);
+    expect(prompt.originalName).toBe('aifuye-demo.html');
+    // The on-disk path still carries no trace of the original name.
+    expect(prompt.path).not.toContain('aifuye');
   });
 
   it('uses MIME-derived safe extensions and never original names', () => {

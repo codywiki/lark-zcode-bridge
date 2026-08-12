@@ -417,6 +417,41 @@ describe('profile v2 migration', () => {
     });
     expect(next.profiles.codex).not.toHaveProperty('sandbox');
   });
+
+  it('migrates a legacy config to a read-only Kimi profile through the migrate command', async () => {
+    const root = await makeRoot();
+    const kimi = await writeVersionExecutable(root, 'kimi', 'kimi 0.29.2');
+    const oldKimiBin = process.env.LARK_CHANNEL_KIMI_BIN;
+    process.env.LARK_CHANNEL_KIMI_BIN = kimi;
+    await writeJson(join(root, 'config.json'), legacyConfigFixture());
+
+    try {
+      await runMigrate({
+        config: join(root, 'config.json'),
+        profile: 'kimi',
+        agent: 'kimi',
+      });
+    } finally {
+      if (oldKimiBin === undefined) {
+        delete process.env.LARK_CHANNEL_KIMI_BIN;
+      } else {
+        process.env.LARK_CHANNEL_KIMI_BIN = oldKimiBin;
+      }
+    }
+
+    const next = (await readJson(join(root, 'config.json'))) as RootConfig;
+    expect(next.activeProfile).toBe('kimi');
+    expect(next.profiles.kimi?.agentKind).toBe('kimi');
+    expect(next.profiles.kimi?.kimi).toEqual({
+      binaryPath: kimi,
+      defaultModel: 'kimi-code/k3',
+    });
+    expect(next.profiles.kimi?.permissions).toEqual({
+      defaultAccess: 'read-only',
+      maxAccess: 'read-only',
+    });
+    expect(next.profiles.kimi).not.toHaveProperty('sandbox');
+  });
 });
 
 function legacyConfigFixture(): unknown {

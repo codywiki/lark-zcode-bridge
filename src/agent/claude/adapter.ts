@@ -1,7 +1,12 @@
 import { createInterface } from 'node:readline';
 import type { Readable } from 'node:stream';
 import { log } from '../../core/logger';
-import { mergeProcessEnv, spawnProcess, type SpawnedProcessByStdio } from '../../platform/spawn';
+import {
+  installProcessOutputExitGuard,
+  mergeProcessEnv,
+  spawnProcess,
+  type SpawnedProcessByStdio,
+} from '../../platform/spawn';
 import { buildBridgeSystemPrompt } from '../bridge-system-prompt';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
 import { checkAgentAvailability, type AgentAvailability } from '../preflight';
@@ -70,12 +75,15 @@ export class ClaudeAdapter implements AgentAdapter {
     ];
     if (opts.sessionId) args.push('--resume', opts.sessionId);
     if (opts.model) args.push('--model', opts.model);
+    const effort = mapClaudeEffort(opts.reasoningEffort);
+    if (effort) args.push('--effort', effort);
 
     const child = spawnProcess(this.binary, args, {
       cwd: opts.cwd,
       env: mergeProcessEnv(process.env, buildLarkChannelEnv(this.larkChannel)),
       stdio: ['ignore', 'pipe', 'pipe'],
     }) as ClaudeChild;
+    const outputGuard = installProcessOutputExitGuard(child);
 
     log.info('agent', 'spawn', {
       pid: child.pid ?? null,
@@ -122,31 +130,42 @@ export class ClaudeAdapter implements AgentAdapter {
     // SIGKILL cascade. Callers (channel.ts, /doctor) override per-run with
     // a value derived from preferences.
     const stopGraceMs = opts.stopGraceMs ?? 5000;
+    let stopPromise: Promise<void> | undefined;
 
     return {
       runId: opts.runId,
-      events: createEventStream(child, stderrChunks, () => runtimeError),
-      async stop() {
-        if (child.exitCode !== null || child.signalCode !== null) return;
-        log.info('agent', 'stop-sigterm', { pid: child.pid ?? null, graceMs: stopGraceMs });
-        child.kill('SIGTERM');
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(() => {
+      pid: child.pid,
+      events: createEventStream(child, stderrChunks, () => runtimeError, outputGuard.closed),
+      stop() {
+        if (stopPromise) return stopPromise;
+        stopPromise = (async () => {
+          try {
             if (child.exitCode === null && child.signalCode === null) {
-              log.warn('agent', 'stop-sigkill', {
-                pid: child.pid ?? null,
-                graceMs: stopGraceMs,
-                reason: 'grace-period-expired',
+              log.info('agent', 'stop-sigterm', { pid: child.pid ?? null, graceMs: stopGraceMs });
+              child.kill('SIGTERM');
+              await new Promise<void>((resolve) => {
+                const timer = setTimeout(() => {
+                  if (child.exitCode === null && child.signalCode === null) {
+                    log.warn('agent', 'stop-sigkill', {
+                      pid: child.pid ?? null,
+                      graceMs: stopGraceMs,
+                      reason: 'grace-period-expired',
+                    });
+                    child.kill('SIGKILL');
+                  }
+                  resolve();
+                }, stopGraceMs);
+                child.once('exit', () => {
+                  clearTimeout(timer);
+                  resolve();
+                });
               });
-              child.kill('SIGKILL');
             }
-            resolve();
-          }, stopGraceMs);
-          child.once('exit', () => {
-            clearTimeout(timer);
-            resolve();
-          });
-        });
+          } finally {
+            outputGuard.close();
+          }
+        })();
+        return stopPromise;
       },
       waitForExit(timeoutMs: number): Promise<boolean> {
         if (child.exitCode !== null || child.signalCode !== null) {
@@ -172,6 +191,7 @@ async function* createEventStream(
   child: ClaudeChild,
   stderrChunks: Buffer[],
   getError: () => Error | null,
+  outputClosed: Promise<void>,
 ): AsyncGenerator<AgentEvent> {
   // If fork itself failed synchronously, child.pid is undefined. The 'error'
   // event (ENOENT etc.) fires in the next tick, so also check getError().
@@ -186,17 +206,9 @@ async function* createEventStream(
   }
 
   const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
-  let sawStdout = false;
-  let silentExitTimer: ReturnType<typeof setTimeout> | undefined;
-  const closeSilentStdout = (): void => {
-    silentExitTimer = setTimeout(() => {
-      if (!sawStdout && !child.stdout.readableEnded) child.stdout.destroy();
-    }, 50);
-  };
-  child.once('exit', closeSilentStdout);
+  void outputClosed.then(() => rl.close());
   try {
     for await (const line of rl) {
-      sawStdout = true;
       const trimmed = line.trim();
       if (!trimmed) continue;
       let parsed: unknown;
@@ -208,8 +220,6 @@ async function* createEventStream(
       yield* translateEvent(parsed);
     }
   } finally {
-    if (silentExitTimer) clearTimeout(silentExitTimer);
-    child.removeListener('exit', closeSilentStdout);
     rl.close();
   }
 
@@ -257,4 +267,27 @@ function isWindowsCommandNotFoundLine(line: string): boolean {
     process.platform === 'win32' &&
     /is not recognized as an internal or external command|operable program or batch file/i.test(line)
   );
+}
+
+// The bridge normalizes /model efforts to codex's vocabulary
+// (minimal/low/medium/high/xhigh/ultra). Claude Code's --effort accepts
+// low/medium/high/xhigh/max, so collapse the two codex-only ends onto the
+// nearest Claude level and drop anything unrecognized.
+function mapClaudeEffort(effort: string | undefined): string | undefined {
+  switch (effort) {
+    case 'minimal':
+    case 'low':
+      return 'low';
+    case 'medium':
+      return 'medium';
+    case 'high':
+      return 'high';
+    case 'xhigh':
+      return 'xhigh';
+    case 'ultra':
+    case 'max':
+      return 'max';
+    default:
+      return undefined;
+  }
 }

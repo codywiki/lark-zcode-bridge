@@ -1,7 +1,11 @@
 import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { claudeCapability, codexCapability } from '../../../src/agent/capability.js';
+import {
+  capabilityForProfile,
+  claudeCapability,
+  codexCapability,
+} from '../../../src/agent/capability.js';
 import { ActiveRuns } from '../../../src/bot/active-runs.js';
 import { ProcessPool } from '../../../src/bot/process-pool.js';
 import {
@@ -64,6 +68,24 @@ describe('agent-aware run-flow resume', () => {
     expect(h.agent.runOptions[0]).toMatchObject({
       sessionId: 'legacy-session',
       threadId: undefined,
+    });
+  });
+
+  it('does not fall back to a legacy Kimi session when a catalog exists but still applies model overrides', async () => {
+    const h = await createHarness('kimi');
+    const cwdRealpath = await realpath(h.tmp.workspace);
+    h.sessions.set('chat-1', 'legacy-cross-policy-session', cwdRealpath);
+    h.sessions.setModel('chat-1', 'kimi-code/k3');
+
+    const run = await start(h);
+
+    expect(run.ok).toBe(true);
+    if (!run.ok) throw new Error('expected fresh Kimi run');
+    expect(run.resumeFrom).toBeUndefined();
+    expect(h.agent.runOptions[0]).toMatchObject({
+      sessionId: undefined,
+      threadId: undefined,
+      model: 'kimi-code/k3',
     });
   });
 
@@ -174,7 +196,7 @@ describe('agent-aware run-flow resume', () => {
   });
 });
 
-async function createHarness(agentKind: 'claude' | 'codex'): Promise<{
+async function createHarness(agentKind: 'claude' | 'codex' | 'kimi'): Promise<{
   tmp: TmpProfile;
   agent: FakeAgentAdapter;
   executor: RunExecutor;
@@ -199,9 +221,11 @@ async function createHarness(agentKind: 'claude' | 'codex'): Promise<{
       },
     },
     ...(agentKind === 'codex' ? { codex: { binaryPath: '/usr/local/bin/codex' } } : {}),
+    ...(agentKind === 'kimi' ? { kimi: { binaryPath: '/usr/local/bin/kimi' } } : {}),
   });
+  const workspaceRealpath = await realpath(tmp.workspace);
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
-  workspaces.setCwd('chat-1', tmp.workspace);
+  workspaces.setCwd('chat-1', workspaceRealpath);
   const sessions = new SessionStore(join(tmp.profile, 'sessions.json'));
   const catalog = new SessionCatalog(join(tmp.profile, 'session-catalog.json'));
   cleanups.push(async () => {
@@ -225,7 +249,7 @@ async function createHarness(agentKind: 'claude' | 'codex'): Promise<{
       ...profileConfig,
       workspaces: {
         ...profileConfig.workspaces,
-        default: tmp.workspace,
+        default: workspaceRealpath,
       },
     },
   };
@@ -244,10 +268,7 @@ async function start(h: Awaited<ReturnType<typeof createHarness>>) {
     prompt: 'hello',
     attachments: [],
     access: { ok: true, reason: 'allowed-user' },
-    capability:
-      h.profileConfig.agentKind === 'codex'
-        ? codexCapability(h.profileConfig)
-        : claudeCapability(h.profileConfig),
+    capability: capabilityForProfile(h.profileConfig),
     profileConfig: h.profileConfig,
     sessions: h.sessions,
     sessionCatalog: h.catalog,

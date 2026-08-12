@@ -86,7 +86,7 @@ export interface AppAccess {
 }
 
 export interface AppPreferences {
-  /** Reply rendering mode for IM (group/p2p) messages. Default 'card'. */
+  /** Reply rendering mode for IM (group/p2p) messages. Default 'markdown'. */
   messageReply?: MessageReplyMode;
   /**
    * Internal marker: pre-0.1.27 the value `'text'` meant "lightweight
@@ -110,10 +110,10 @@ export interface AppPreferences {
    */
   maxConcurrentRuns?: number;
   /**
-   * Global default idle-timeout for claude runs, in minutes. When set,
-   * if claude emits no stream event for this long the bridge kills the
-   * run as presumed-hung. Undefined / 0 = no timeout (the default — runs
-   * can hang indefinitely). Per-scope `/timeout` overrides this.
+   * Global idle-timeout for agent runs, in minutes. If the agent emits no
+   * stream event for this long the bridge stops the run as presumed-hung.
+   * Missing = 20 minutes; explicit 0 disables it. Per-scope `/timeout`
+   * overrides this.
    */
   runIdleTimeoutMinutes?: number;
   /**
@@ -229,12 +229,6 @@ export function getRequireMentionInGroup(cfg: AppConfig): boolean {
 }
 
 /**
- * Resolve the global default idle-timeout in ms. Returns `undefined` when
- * disabled (the default). Clamps to [1, 120] minutes when set so a typo
- * can't lock the bot into a 1-second kill loop or wait forever to a number
- * the user didn't really mean.
- */
-/**
  * Grace period before SIGKILL fallback when stopping a claude subprocess.
  * Returns ms. Defaults to 5000 (5 seconds). Clamps to [100, 30000] so a
  * typo can't either make stop() effectively SIGKILL-immediate or hang for
@@ -246,9 +240,15 @@ export function getAgentStopGraceMs(cfg: AppConfig): number {
   return Math.min(30_000, Math.max(100, Math.floor(raw)));
 }
 
+/**
+ * Resolve the global idle watchdog. Missing or invalid values use the safe
+ * 20-minute default; explicit 0 is the opt-out. Configured values clamp to
+ * [1, 120] minutes.
+ */
 export function getRunIdleTimeoutMs(cfg: AppConfig): number | undefined {
   const raw = cfg.preferences?.runIdleTimeoutMinutes;
-  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return undefined;
+  if (raw === 0) return undefined;
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0) return 20 * 60_000;
   const clamped = Math.min(Math.max(Math.floor(raw), 1), 120);
   return clamped * 60_000;
 }

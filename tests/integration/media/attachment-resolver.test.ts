@@ -45,6 +45,47 @@ describe('hash media attachment resolver', () => {
     expect(await readFile(attachment!.absPath, 'utf8')).toBe('image-bytes');
   });
 
+  it('recovers the extension from the original filename when mime maps to bin', async () => {
+    const root = await tempDir();
+    const bytes = Buffer.from('<html>demo</html>');
+    const cache = new MediaCache(fakeChannel(bytes, 'text/html'), root);
+
+    const [attachment] = await cache.resolve([
+      {
+        messageId: 'om_fwd_sub',
+        resource: {
+          type: 'file',
+          fileKey: 'file_v3_html',
+          fileName: 'aifuye-demo.html',
+        } as never,
+      },
+    ]);
+
+    const hash = createHash('sha256').update(bytes).digest('hex');
+    expect(attachment).toMatchObject({
+      absPath: join(root, `${hash}.html`),
+      mime: 'text/html',
+      originalName: 'aifuye-demo.html',
+      decision: 'accepted',
+    });
+  });
+
+  it('keeps the bin extension when the filename offers no safe extension', async () => {
+    const root = await tempDir();
+    const bytes = Buffer.from('opaque-bytes');
+    const cache = new MediaCache(fakeChannel(bytes, 'application/octet-stream'), root);
+
+    const [attachment] = await cache.resolve([
+      {
+        messageId: 'om_1',
+        resource: { type: 'file', fileKey: 'k', fileName: 'no-extension' } as never,
+      },
+    ]);
+
+    const hash = createHash('sha256').update(bytes).digest('hex');
+    expect(attachment?.absPath).toBe(join(root, `${hash}.bin`));
+  });
+
   it('hashes downloaded resources without reading the full file into memory', async () => {
     const source = await readFile(new URL('../../../src/media/cache.ts', import.meta.url), 'utf8');
 
@@ -114,7 +155,7 @@ describe('hash media attachment resolver', () => {
   });
 });
 
-function fakeChannel(bytes: Buffer) {
+function fakeChannel(bytes: Buffer, contentType = 'image/png') {
   return {
     async downloadResourceToFile(
       _messageId: string,
@@ -123,7 +164,7 @@ function fakeChannel(bytes: Buffer) {
       destPath: string,
     ) {
       await writeFile(destPath, bytes);
-      return { contentType: 'image/png', bytesWritten: bytes.length };
+      return { contentType, bytesWritten: bytes.length };
     },
   } as never;
 }

@@ -67,6 +67,81 @@ describe('logger redaction', () => {
     expect(text).not.toContain('/tmp/lark-channel/secret/file.txt');
   });
 
+  it('records circular SDK response data without crashing or leaking credentials', async () => {
+    const apiData: Record<string, unknown> = {
+      code: 400,
+      token: 'nested-secret-token',
+    };
+    apiData.socket = apiData;
+    const err = Object.assign(new Error('resource download failed'), {
+      response: { status: 400, data: apiData },
+    });
+
+    expect(() => log.fail('media', err, { fileKey: 'file_v3_secret' })).not.toThrow();
+    await flushLogger();
+
+    const text = await readTodayLog();
+    expect(text).not.toContain('nested-secret-token');
+    expect(text).not.toContain('file_v3_secret');
+    expect(JSON.parse(text.trim())).toMatchObject({
+      phase: 'media',
+      event: 'fail',
+      apiStatus: 400,
+      apiData: {
+        code: 400,
+        token: '[REDACTED]',
+        socket: '[Circular]',
+      },
+    });
+  });
+
+  it('isolates an SDK response getter that throws while preserving safe fields', async () => {
+    const apiData: Record<string, unknown> = {
+      code: 400,
+      token: 'getter-secret-token',
+    };
+    Object.defineProperty(apiData, 'socket', {
+      enumerable: true,
+      get() {
+        throw new Error('getter exploded');
+      },
+    });
+    const err = Object.assign(new Error('resource download failed'), {
+      response: { status: 400, data: apiData },
+    });
+
+    expect(() => log.fail('media', err)).not.toThrow();
+    await flushLogger();
+
+    const text = await readTodayLog();
+    expect(text).not.toContain('getter-secret-token');
+    expect(text).not.toContain('getter exploded');
+    expect(JSON.parse(text.trim())).toMatchObject({
+      apiData: {
+        code: 400,
+        token: '[REDACTED]',
+        socket: '[Unserializable]',
+      },
+    });
+  });
+
+  it('bounds deeply nested SDK response data before the call stack is exhausted', async () => {
+    let apiData: Record<string, unknown> = { token: 'deep-secret-token' };
+    for (let depth = 0; depth < 10_000; depth++) {
+      apiData = { child: apiData };
+    }
+    const err = Object.assign(new Error('resource download failed'), {
+      response: { status: 400, data: apiData },
+    });
+
+    expect(() => log.fail('media', err)).not.toThrow();
+    await flushLogger();
+
+    const text = await readTodayLog();
+    expect(text).not.toContain('deep-secret-token');
+    expect(text).toContain('[MaxDepth]');
+  });
+
   it('redacts credentials inside stringified JSON sdk args', async () => {
     log.warn('sdk', 'error', {
       args: [

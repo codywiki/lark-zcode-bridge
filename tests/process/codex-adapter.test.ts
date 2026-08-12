@@ -10,6 +10,7 @@ interface FakeBinary {
   path: string;
   dir: string;
   recordPath: string;
+  descendantPidPath?: string;
 }
 
 describe('CodexAdapter process contract', () => {
@@ -61,7 +62,7 @@ describe('CodexAdapter process contract', () => {
     expect(run.runId).toBe('run-fresh');
     expect(await collect(run.events)).toEqual([
       { type: 'system', threadId: 'thread-fresh' },
-      { type: 'text', delta: 'hello user' },
+      { type: 'final_text', content: 'hello user' },
       { type: 'done', threadId: 'thread-fresh', terminationReason: 'normal' },
     ]);
     const record = await readRecord(fake.recordPath);
@@ -76,11 +77,13 @@ describe('CodexAdapter process contract', () => {
     expect(record.stdin).toContain('lark-cli auth login');
     expect(record.stdin).toContain('LARK_CHANNEL_PROFILE');
     expect(record.stdin).toContain('LARKSUITE_CLI_CONFIG_DIR');
+    expect(record.stdin).toContain('LARK_CHANNEL_IMAGE_DIR');
     expect(record.stdin).not.toContain('lark-cli config bind --source lark-channel');
     expect(record.stdin).toContain('hello from lark');
     expect(record.stdin).not.toBe('hello from lark');
     expect(record.env).toMatchObject({
       LARK_CHANNEL: '1',
+      LARK_CHANNEL_IMAGE_DIR: join(fake.dir, 'images'),
       CODEX_HOME: '/outer/codex-home',
     });
     expect(record.env.APP_SECRET).toBe('inherited-secret');
@@ -122,6 +125,7 @@ describe('CodexAdapter process contract', () => {
       LARK_CHANNEL_HOME: rootDir,
       LARK_CHANNEL_CONFIG: larkCliSourceConfigFile,
       LARKSUITE_CLI_CONFIG_DIR: larkCliConfigDir,
+      LARK_CHANNEL_IMAGE_DIR: join(fake.dir, 'images'),
       CODEX_HOME: '/outer/codex-home',
     });
   });
@@ -340,7 +344,7 @@ describe('CodexAdapter process contract', () => {
 
     expect(await collect(run.events)).toEqual([
       { type: 'system', threadId: 'thread-retry' },
-      { type: 'text', delta: 'after retry' },
+      { type: 'final_text', content: 'after retry' },
       { type: 'done', threadId: 'thread-retry', terminationReason: 'normal' },
     ]);
   });
@@ -408,6 +412,33 @@ describe('CodexAdapter process contract', () => {
     await iterator.return?.();
   });
 
+  it('finishes the event stream when a descendant keeps stdout open after the parent exits', async () => {
+    const fake = await createFakeCodex({
+      lines: [{ type: 'thread.started', thread_id: 'thread-descendant' }],
+      holdStdoutWithDescendant: true,
+    });
+    cleanup.push(fake.dir);
+
+    try {
+      const run = new CodexAdapter({ binary: fake.path, profileStateDir: fake.dir }).run({
+        runId: 'run-descendant',
+        prompt: 'descendant',
+        cwd: await realpath(fake.dir),
+      });
+
+      await expect(within(collect(run.events), 1_500)).resolves.toEqual([
+        { type: 'system', threadId: 'thread-descendant' },
+        {
+          type: 'error',
+          message: 'codex stream ended before a terminal event',
+          terminationReason: 'failed',
+        },
+      ]);
+    } finally {
+      await killRecordedDescendant(fake.descendantPidPath);
+    }
+  });
+
   it('requires cwd to be resolved by policy before spawning', () => {
     expect(() =>
       new CodexAdapter({ binary: 'unused', profileStateDir: tmpdir() }).run({
@@ -429,15 +460,20 @@ async function createFakeCodex(options: {
   stderr?: string;
   exitCode?: number;
   exitDelayMs?: number;
+  holdStdoutWithDescendant?: boolean;
 }): Promise<FakeBinary> {
   const dir = await mkdtemp(join(tmpdir(), 'codex-adapter-test-'));
   const path = join(dir, 'fake-codex.mjs');
   const recordPath = join(dir, 'argv.json');
+  const descendantPidPath = options.holdStdoutWithDescendant
+    ? join(dir, 'descendant.pid')
+    : undefined;
   await writeFile(
     path,
     [
       '#!/usr/bin/env node',
       'import { writeFileSync } from "node:fs";',
+      'import { spawn } from "node:child_process";',
       'let stdin = "";',
       'process.stdin.setEncoding("utf8");',
       'process.stdin.on("data", (chunk) => { stdin += chunk; });',
@@ -452,11 +488,18 @@ async function createFakeCodex(options: {
       '      LARK_CHANNEL_HOME: process.env.LARK_CHANNEL_HOME,',
       '      LARK_CHANNEL_CONFIG: process.env.LARK_CHANNEL_CONFIG,',
       '      LARKSUITE_CLI_CONFIG_DIR: process.env.LARKSUITE_CLI_CONFIG_DIR,',
+      '      LARK_CHANNEL_IMAGE_DIR: process.env.LARK_CHANNEL_IMAGE_DIR,',
       '      CODEX_HOME: process.env.CODEX_HOME,',
       '      APP_SECRET: process.env.APP_SECRET,',
       '      PATH: process.env.PATH,',
       '    },',
       '  }));',
+      descendantPidPath
+        ? `  const descendant = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: ['ignore', 'inherit', 'ignore'] });`
+        : '',
+      descendantPidPath
+        ? `  writeFileSync(${JSON.stringify(descendantPidPath)}, String(descendant.pid));`
+        : '',
       `  const lines = ${JSON.stringify(options.lines)};`,
       '  for (const line of lines) console.log(JSON.stringify(line));',
       options.stderr ? `  process.stderr.write(${JSON.stringify(options.stderr)});` : '',
@@ -466,7 +509,43 @@ async function createFakeCodex(options: {
     'utf8',
   );
   await chmod(path, 0o755);
-  return { path, dir, recordPath };
+  return {
+    path,
+    dir,
+    recordPath,
+    ...(descendantPidPath ? { descendantPidPath } : {}),
+  };
+}
+
+async function within<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function killRecordedDescendant(path: string | undefined): Promise<void> {
+  if (!path) return;
+  let raw: string;
+  try {
+    raw = await readFile(path, 'utf8');
+  } catch {
+    return;
+  }
+  const pid = Number.parseInt(raw, 10);
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  try {
+    process.kill(pid, 'SIGKILL');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ESRCH') throw err;
+  }
 }
 
 async function readRecord(path: string): Promise<{
@@ -479,6 +558,7 @@ async function readRecord(path: string): Promise<{
     LARK_CHANNEL_HOME?: string;
     LARK_CHANNEL_CONFIG?: string;
     LARKSUITE_CLI_CONFIG_DIR?: string;
+    LARK_CHANNEL_IMAGE_DIR?: string;
     CODEX_HOME?: string;
     APP_SECRET?: string;
     PATH?: string;
@@ -494,6 +574,7 @@ async function readRecord(path: string): Promise<{
       LARK_CHANNEL_HOME?: string;
       LARK_CHANNEL_CONFIG?: string;
       LARKSUITE_CLI_CONFIG_DIR?: string;
+      LARK_CHANNEL_IMAGE_DIR?: string;
       CODEX_HOME?: string;
       APP_SECRET?: string;
       PATH?: string;

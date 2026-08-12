@@ -1,7 +1,9 @@
 import type { Block, FooterStatus, RunState, ToolEntry } from './run-state';
 import { toolBodyMd, toolHeaderText } from './tool-render';
+import { isSignificantTool } from './tool-significance';
 
 const REASONING_MAX = 1500;
+const COMPACT_PROCESS_MAX = 6000;
 const COLLAPSE_TOOL_THRESHOLD = 3;
 
 interface ToolGroup {
@@ -16,22 +18,28 @@ type Group = ToolGroup | TextGroup;
 
 export interface RunCardRenderOptions {
   signCallback?: (action: string) => string;
+  compactProcess?: boolean;
 }
 
 export function renderCard(state: RunState, options: RunCardRenderOptions = {}): object {
   const elements: object[] = [];
 
-  if (state.reasoning.content) {
-    elements.push(reasoningPanel(state.reasoning.content, state.reasoning.active));
-  }
+  if (options.compactProcess) {
+    const panel = compactProcessPanel(state);
+    if (panel) elements.push(panel);
+  } else {
+    if (state.reasoning.content) {
+      elements.push(reasoningPanel(state.reasoning.content, state.reasoning.active));
+    }
 
-  for (const group of groupBlocks(state.blocks)) {
-    if (group.kind === 'text') {
-      if (group.content.trim()) {
-        elements.push(markdown(group.content));
+    for (const group of groupBlocks(state.blocks)) {
+      if (group.kind === 'text') {
+        if (group.content.trim()) {
+          elements.push(markdown(group.content));
+        }
+      } else {
+        elements.push(...renderToolGroup(group.tools, state.terminal !== 'running'));
       }
-    } else {
-      elements.push(...renderToolGroup(group.tools, state.terminal !== 'running'));
     }
   }
 
@@ -47,6 +55,7 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
   }
 
   if (state.terminal === 'running') {
+    if (state.liveStatus) elements.push(noteMd(liveStatusLine(state.liveStatus)));
     if (state.footer) elements.push(footerStatus(state.footer));
     elements.push(stopButton(options));
   }
@@ -59,6 +68,43 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
     },
     body: { elements },
   };
+}
+
+function compactProcessPanel(state: RunState): object | undefined {
+  const progress = state.blocks
+    .filter((block): block is Extract<Block, { kind: 'text' }> => block.kind === 'text')
+    .map((block) => block.content.trim())
+    .filter(Boolean);
+  const tools = state.blocks
+    .filter((block): block is Extract<Block, { kind: 'tool' }> => block.kind === 'tool')
+    .map((block) => block.tool);
+  if (progress.length === 0 && tools.length === 0) return undefined;
+
+  // Inside the panel there is room to list more than the transcript shows, but
+  // listing every read still buries the ones that changed something — so the
+  // significant calls are named and the rest are counted.
+  const notable = tools.filter(isSignificantTool);
+  const suppressed = tools.length - notable.length;
+
+  const bodyParts: string[] = [];
+  if (progress.length > 0) bodyParts.push(`**进度**\n${progress.join('\n\n')}`);
+  if (notable.length > 0) {
+    bodyParts.push(`**工具调用**\n${notable.map((tool) => `- ${toolHeaderText(tool)}`).join('\n')}`);
+  }
+  if (suppressed > 0) {
+    bodyParts.push(`_另有 ${suppressed} 次读取/检索，未逐条列出。_`);
+  }
+  const counts = [
+    progress.length > 0 ? `${progress.length} 条进度` : '',
+    tools.length > 0 ? `${tools.length} 个工具` : '',
+  ].filter(Boolean);
+
+  return collapsiblePanel({
+    title: `☕ **执行过程 · ${counts.join(' · ')}**`,
+    expanded: false,
+    border: 'blue',
+    body: truncate(bodyParts.join('\n\n'), COMPACT_PROCESS_MAX),
+  });
 }
 
 function* groupBlocks(blocks: Block[]): Generator<Group> {
@@ -199,6 +245,14 @@ function footerStatus(status: Exclude<FooterStatus, null>): object {
         ? '🧰 正在调用工具'
         : '✍️ 正在输出';
   return noteMd(text);
+}
+
+function liveStatusLine(status: NonNullable<RunState['liveStatus']>): string {
+  if (status.elapsedSeconds < 60) return '_⏱ 已受理，任务正在运行_';
+  const elapsedMinutes = Math.max(1, Math.floor(status.elapsedSeconds / 60));
+  if (status.idleSeconds < 60) return `_⏱ 已运行 ${elapsedMinutes} 分钟 · 刚刚有活动_`;
+  const idleMinutes = Math.floor(status.idleSeconds / 60);
+  return `_⏱ 已运行 ${elapsedMinutes} 分钟 · 最近活动 ${idleMinutes} 分钟前_`;
 }
 
 function summaryText(state: RunState): string {

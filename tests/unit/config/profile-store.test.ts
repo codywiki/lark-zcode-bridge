@@ -6,7 +6,12 @@ import {
   createDefaultProfileConfig,
   type RootConfig,
 } from '../../../src/config/profile-schema';
-import { createRootConfig, loadRootConfig, saveRootConfig } from '../../../src/config/profile-store';
+import {
+  agentKindFromString,
+  createRootConfig,
+  loadRootConfig,
+  saveRootConfig,
+} from '../../../src/config/profile-store';
 
 const roots: string[] = [];
 
@@ -27,6 +32,10 @@ async function tmpRoot(): Promise<string> {
 }
 
 describe('profile store canonical serialization', () => {
+  it('accepts kimi as an agent kind', () => {
+    expect(agentKindFromString('kimi')).toBe('kimi');
+  });
+
   it('saves stored root and profile config without unknown root fields or runtime-only profile fields', async () => {
     const root = await tmpRoot();
     const configPath = join(root, 'config.json');
@@ -161,6 +170,44 @@ describe('profile store canonical serialization', () => {
     expect(loaded?.profiles.codex?.sandbox).toMatchObject({
       defaultMode: 'workspace-write',
       maxMode: 'workspace-write',
+    });
+  });
+
+  it('round-trips Kimi binary configuration', async () => {
+    const root = await tmpRoot();
+    const configPath = join(root, 'config.json');
+    const profile = createDefaultProfileConfig({
+      agentKind: 'kimi',
+      accounts: { app },
+      kimi: { binaryPath: '/usr/local/bin/kimi', defaultModel: 'kimi-code/k3' },
+    });
+    profile.workspaces = {
+      default: '/repo/kimi',
+      allowedRoots: ['/repo/kimi-secondary'],
+    };
+
+    await saveRootConfig({
+      schemaVersion: 2,
+      activeProfile: 'kimi',
+      preferences: {},
+      profiles: { kimi: profile },
+    }, configPath);
+
+    const stored = JSON.parse(await readFile(configPath, 'utf8')) as {
+      profiles: Record<string, { kimi?: { binaryPath?: string; defaultModel?: string } }>;
+    };
+    const loaded = await loadRootConfig(configPath);
+    expect(stored.profiles.kimi?.kimi).toEqual({
+      binaryPath: '/usr/local/bin/kimi',
+      defaultModel: 'kimi-code/k3',
+    });
+    expect(loaded?.profiles.kimi?.kimi).toEqual({
+      binaryPath: '/usr/local/bin/kimi',
+      defaultModel: 'kimi-code/k3',
+    });
+    expect(loaded?.profiles.kimi?.workspaces).toEqual({
+      default: '/repo/kimi',
+      allowedRoots: ['/repo/kimi-secondary'],
     });
   });
 

@@ -1,6 +1,7 @@
 import { realpath, stat } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { basename, dirname, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import type { ProfileConfig } from '../config/profile-schema';
 
 export type WorkingDirectoryRejectReason =
   | 'empty-requested-cwd'
@@ -12,7 +13,8 @@ export type WorkingDirectoryRejectReason =
   | 'system-root'
   | 'temp-root'
   | 'broad-user-folder'
-  | 'volume-root';
+  | 'volume-root'
+  | 'outside-profile-root';
 
 export type WorkingDirectoryResolveResult =
   | { ok: true; requestedCwd: string; cwdRealpath: string }
@@ -54,6 +56,90 @@ export async function resolveWorkingDirectory(
   };
 }
 
+/**
+ * Return the configured authorization roots in precedence order. The default
+ * workspace remains both the fallback cwd and an authorization root. Older
+ * profiles without allowedRoots therefore keep their previous behavior.
+ */
+export function allowedWorkspaceRoots(workspaces: ProfileConfig['workspaces']): string[] {
+  const roots = [workspaces.default, ...(workspaces.allowedRoots ?? [])];
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const configuredRoot of roots) {
+    const root = configuredRoot?.trim();
+    if (!root || seen.has(root)) continue;
+    seen.add(root);
+    result.push(root);
+  }
+
+  return result;
+}
+
+/**
+ * Resolve the active cwd and enforce Kimi's profile-root authorization.
+ *
+ * Only the selected cwd is returned to the run policy. Additional roots are
+ * authorization choices, not extra filesystem grants for the spawned agent.
+ */
+export async function resolveAuthorizedWorkingDirectory(
+  requestedCwd: string,
+  profileConfig: ProfileConfig,
+): Promise<WorkingDirectoryResolveResult> {
+  const workspace = await resolveWorkingDirectory(requestedCwd);
+  if (!workspace.ok || profileConfig.agentKind !== 'kimi') return workspace;
+
+  for (const configuredRoot of allowedWorkspaceRoots(profileConfig.workspaces)) {
+    const root = await resolveCanonicalAuthorizationRoot(configuredRoot);
+    if (!root) continue;
+    if (containsCanonicalPath(root, workspace.cwdRealpath)) return workspace;
+  }
+
+  return reject(
+    'outside-profile-root',
+    requestedCwd,
+    'Kimi 只允许使用 Profile 授权工作目录及其子目录。',
+  );
+}
+
+/**
+ * Resolve both paths before checking containment so symlinks cannot escape
+ * the configured profile workspace. Both paths must be usable directories,
+ * the root must be a canonical configured path, and the root itself is
+ * allowed.
+ */
+export async function isWorkingDirectoryWithinRoot(
+  requestedCwd: string,
+  allowedRoot: string,
+): Promise<boolean> {
+  const [workspace, root] = await Promise.all([
+    resolveWorkingDirectory(requestedCwd),
+    resolveCanonicalAuthorizationRoot(allowedRoot),
+  ]);
+  return workspace.ok && root !== undefined && containsCanonicalPath(root, workspace.cwdRealpath);
+}
+
+async function resolveCanonicalAuthorizationRoot(
+  configuredRoot: string,
+): Promise<string | undefined> {
+  const root = await resolveWorkingDirectory(configuredRoot);
+  if (!root.ok) return undefined;
+
+  // Profile startup canonicalizes authorization roots. If a canonical root is
+  // later replaced by a symlink, realpath no longer matches the configured
+  // snapshot and the grant fails closed instead of silently moving elsewhere.
+  if (root.cwdRealpath !== configuredRoot) return undefined;
+  return root.cwdRealpath;
+}
+
+function containsCanonicalPath(rootRealpath: string, candidateRealpath: string): boolean {
+  const fromRoot = relative(rootRealpath, candidateRealpath);
+  return (
+    fromRoot === '' ||
+    (fromRoot !== '..' && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot))
+  );
+}
+
 function reject(
   reason: WorkingDirectoryRejectReason,
   requestedCwd: string,
@@ -91,10 +177,19 @@ function classifyHighRiskWorkingDirectory(
   const systemRoots = new Set([
     '/Applications',
     '/bin',
+    '/cores',
+    '/dev',
     '/etc',
+    '/home',
     '/Library',
+    '/mnt',
+    '/Network',
+    '/opt',
     '/private',
+    '/private/etc',
+    '/private/var',
     '/sbin',
+    '/srv',
     '/System',
     '/usr',
     '/var',

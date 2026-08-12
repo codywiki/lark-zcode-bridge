@@ -1,6 +1,6 @@
 # lark-channel-bridge
 
-把飞书 / Lark 消息和本地 Claude Code 或 Codex CLI 打通的轻量 bot。用一条命令启动，扫码绑定 PersonalAgent 应用，然后在飞书里和本机编程助手对话，让它读图、处理文件、改代码。
+把飞书 / Lark 消息和本地 Claude Code、Codex CLI 或 Kimi Code CLI 打通的轻量 bot。用一条命令启动，扫码绑定 PersonalAgent 应用，然后在飞书里和本机编程助手对话，让它读图、处理文件、改代码。
 
 [English README](./README.md)
 
@@ -8,8 +8,9 @@
 
 ## 主要功能
 
-- 在飞书私聊直接发消息，或在群里 `@bot`，把任务转给本机 Claude Code / Codex CLI。
+- 在飞书私聊直接发消息，或在群里 `@bot`，把任务转给本机 Claude Code / Codex CLI / Kimi Code CLI。
 - **流式卡片**：文本回复和工具调用实时更新在同一张卡片上。
+- **全局结果摘要**：所有 profile 的流式任务成功结束后，都会额外发送一条独立、限长的纯文字结果摘要；纯文本回复模式不会重复发送。
 - **会话延续**：每个聊天、话题或文档评论有自己的会话，不会互相串。
 - **排队与消息合并**：短时间连续发送的消息会合并处理；任务运行中收到的普通消息会排队到下一轮，`/new`、`/cd`、`/ws use`、`/stop` 这类命令可以中断当前任务。
 - **多工作空间**：用 `/cd` 切换当前项目，用 `/ws` 保存和复用常用项目目录。
@@ -19,9 +20,10 @@
 ## 前置条件
 
 - Node.js **>= 20.12.0**
-- 本机至少安装并登录一个 agent：
+- 本机至少安装一个 agent，并按对应说明完成授权：
   - Claude Code：`claude`，安装说明：https://docs.anthropic.com/en/docs/claude-code/quickstart
   - Codex CLI：`codex`，安装说明：https://developers.openai.com/codex/cli
+  - Kimi Code CLI：`kimi`，安装说明：https://moonshotai.github.io/kimi-code/。不要用全局 `kimi login` 给 bridge bot 授权；创建 profile 后按下方命令登录隔离 profile。
 - 一个飞书 / Lark PersonalAgent 应用。首次启动的扫码向导可以帮你创建并绑定。
 
 ## 安装
@@ -87,14 +89,19 @@ lark-channel-bridge unregister [--profile <name>]
 
 daemon 日志在 `~/.lark-channel/profiles/<profile>/logs/daemon/`。
 
-### 多 profile：分别运行 Claude 和 Codex
+### 多 profile：分别运行 Claude、Codex 和 Kimi
 
-默认情况下，bridge 使用当前激活的 profile；可以通过 `profile use <name>` 切换。每个 profile 会维护独立的应用凭据、会话、工作目录和日志。只有在需要同时连接多个 PersonalAgent 应用，或分别运行 Claude 和 Codex 时，才需要创建多个 profile：
+默认情况下，bridge 使用当前激活的 profile；可以通过 `profile use <name>` 切换。每个 profile 会维护独立的应用凭据、会话、工作目录和日志。只有在需要同时连接多个 PersonalAgent 应用，或分别运行 Claude、Codex 和 Kimi 时，才需要创建多个 profile：
 
 ```bash
-lark-channel-bridge start --profile claude --agent claude
-lark-channel-bridge start --profile codex --agent codex
+lark-channel-bridge profile create kimi --agent kimi --workspace /path/to/a/narrow/project
+lark-channel-bridge profile login kimi
+lark-channel-bridge start --profile kimi
 ```
+
+`profile login kimi` 会把 Kimi 凭据保存在 `~/.lark-channel/profiles/kimi/kimi-home`；普通的全局 `kimi login` 不会给这个隔离 bot profile 授权。Claude、Codex profile 仍可按原方式创建和启动。
+
+Kimi 适配器通过 `kimi acp` 接入，目前是仅支持 macOS、仅支持纯文本的受限试点，并严格锁定 Kimi Code **0.29.2**；其它版本会 fail closed。新建 Kimi profile 默认仍是只读模式。在该模式下，每次 bot ACP 运行及其运行前 Kimi 配置校验都会进入 macOS Seatbelt；Kimi 子进程不能直接读取工作区正文，文本读取必须经过 bridge 的 ACP 反向接口，并校验 realpath 范围、敏感路径、普通 UTF-8 文件和 1 MiB 上限。bridge 只允许按已知路径 `Read` 和检查元数据，不能列目录，也不支持 Glob/Grep；同时强制 `default/manual` 会话模式并拒绝审批，禁用写入、进程执行、附件、MCP、子 Agent、Skill、hook 和 plugin。只读边界由工具拒绝规则、ACP 反向文件接口和 Seatbelt 独立执行，不依赖会话模式。发现 `AGENTS.md`、MCP 配置、Kimi 本地配置或项目 Skill 目录等隐式扩展入口时也会拒绝启动。只读模式在缺少 macOS Seatbelt 时会 fail closed。Kimi 的 `workspace` 模式保留 Seatbelt，允许本机 Shell/进程执行，并将项目数据的读写限制在当前激活工作目录内。额外读取例外只有 Apple `system.sb` 运行基线、Kimi 安装目录和隔离的 profile home；其中只有隔离 profile home 也可写。只有将 Kimi 的两个权限值都显式设为 `full`，才会不启用 Seatbelt，并开放本机 Shell 与文件读取、写入和编辑工具。full 模式拥有 bridge 操作系统用户的权限，不受所选工作区限制：prompt 可以执行任意命令，也可以读取、修改、删除或泄露该用户可访问的任何本机文件或凭据。只应在独立、可信的 profile 和操作系统账号中使用。Kimi 暂不处理云文档评论。Kimi 的思考内容不会外发；普通回答最多缓冲 20 KB，并在单轮结束后统一做路径脱敏再进入卡片，因此试点期间不会逐 chunk 流式展示 Kimi 回答正文。Read 工具面板只展示有界的路径/行号摘要和完成状态，不会展示原始文件输出。面向团队使用时，应给 Kimi 创建独立的 PersonalAgent 应用和 profile，不要复用 Claude 或 Codex bot 的应用凭据。
 
 例如只重启 Codex bot：
 
@@ -108,18 +115,20 @@ lark-channel-bridge status --profile codex
 ### 宿主 CLI
 
 ```text
-lark-channel-bridge run [--profile <name>] [--agent claude|codex] [--workspace <path>] [-c <config>]
-lark-channel-bridge migrate [--profile <name>] [--agent claude|codex]
+lark-channel-bridge run [--profile <name>] [--agent claude|codex|kimi] [--workspace <path>] [-c <config>]
+lark-channel-bridge migrate [--profile <name>] [--agent claude|codex|kimi]
 lark-channel-bridge ps
 lark-channel-bridge kill <id|#>
 lark-channel-bridge --help
 ```
 
-`profile use <name>` 会切换后续默认启动使用的 profile。需要同时跑 Claude / Codex 两个 bot、连接多套 PersonalAgent 应用，或做脚本化部署时，再使用这些 profile 管理命令：
+`profile use <name>` 会切换后续默认启动使用的 profile。需要同时跑 Claude / Codex / Kimi 多个 bot、连接多套 PersonalAgent 应用，或做脚本化部署时，再使用这些 profile 管理命令：
 
 ```bash
 lark-channel-bridge profile create claude --agent claude
 lark-channel-bridge profile create codex --agent codex
+lark-channel-bridge profile create kimi --agent kimi
+lark-channel-bridge profile login kimi
 lark-channel-bridge profile list
 lark-channel-bridge profile use <name>
 lark-channel-bridge profile remove <name>
@@ -148,7 +157,7 @@ lark-channel-bridge profile export <name> --include-secrets --yes
 | `/invite user @某人` | 允许用户私聊使用 bot |
 | `/invite admin @某人` | 添加访问控制管理员 |
 | `/invite group` | 允许当前群使用 bot |
-| `/invite all group` | 允许 bot 所在的所有群使用 |
+| `/invite all group` | 允许 bot 所在的所有群使用（Kimi profile 禁用） |
 | `/remove user @某人`, `/remove admin @某人`, `/remove group` | 移除访问控制条目 |
 | `/stop` | 停止当前 run，也可点卡片停止按钮 |
 | `/timeout [N\|off\|default]` | 设置或清除当前会话的 idle watchdog |
@@ -168,23 +177,27 @@ lark-channel-bridge profile export <name> --include-secrets --yes
 
 ## 工作目录
 
-每个 profile 都可以有一个默认工作目录：`workspaces.default`。新建 profile 时可以传 `--workspace <path>` 作为初始目录；没传时 bridge 会创建一个 profile 托管的默认工作目录。
+每个 profile 都可以有一个默认工作目录：`workspaces.default`。新建 profile 时可以传 `--workspace <path>` 作为初始目录；没传时 bridge 会创建一个 profile 托管的默认工作目录。Kimi profile 还可以通过 `workspaces.allowedRoots` 配置多个可选根目录；默认目录始终是隐式授权根。
 
 下面只是 profile 里的字段片段，不要整段覆盖 `config.json`；请改对应 profile 下的 `workspaces` 字段。
 
 ```json
 {
   "workspaces": {
-    "default": "/Users/me/.lark-channel-workspaces/claude/default"
+    "default": "/Users/me/Kimi Code",
+    "allowedRoots": [
+      "/Users/me/Kimi Projects/client-a",
+      "/Volumes/Work/Kimi Projects/client-b"
+    ]
   }
 }
 ```
 
-bridge 会检查所选目录存在、是目录，并且不是 `/`、Home 根、系统目录或临时目录根这类范围过大的位置。工作目录只是 agent run 的当前目录，不是文件系统 sandbox；agent 实际能访问哪些文件仍取决于本机 agent 进程及其权限模式。
+bridge 会检查每个授权根和所选目录存在、是目录、realpath 落在授权根内，并且不是 `/`、Home 根、系统目录或临时目录根这类范围过大的位置。对 Kimi 来说，`/cd` 和 `/ws use` 可以选择默认根、额外授权根或其子目录，但单次运行只会拿到当前选中的一个规范化工作目录。新增根目录必须在本机修改 profile 并重启该 profile 服务，群聊命令不能扩大白名单。对未启用沙箱的权限模式而言，工作目录本身并不是文件系统 sandbox；agent 实际能访问哪些文件仍取决于本机 agent 进程及其权限模式。
 
 ## 权限模式
 
-推荐给用户配置的是 `permissions.defaultAccess` 和 `permissions.maxAccess`。新 profile 默认两项都是 `full`，以保持 bridge 的本地工具、授权流程、文件写入等能力完整可用。如需收紧权限，可以改成 `workspace` 或 `read-only`；收紧后本地工具执行、登录 / 授权流程、文件写入等能力可能受限。
+推荐给用户配置的是 `permissions.defaultAccess` 和 `permissions.maxAccess`。新的 Claude 和 Codex profile 默认两项都是 `full`，以保持 bridge 的本地工具、授权流程、文件写入等能力完整可用。新的 Kimi profile 仍会把两项默认为 `read-only`，保留 Seatbelt 和 ACP 受控读取边界。Kimi 的 `workspace` 保留 Seatbelt，同时允许本机 Shell/进程执行和当前激活工作目录内的项目数据读取、写入、编辑，并受上述少量运行例外约束。只有将 Kimi 的两项都显式设为 `full`，才会在无 Seatbelt 时开启这些本地工具。如需收紧 Claude 或 Codex 权限，可以改成 `workspace` 或 `read-only`；收紧后本地工具执行、登录 / 授权流程、文件写入等能力可能受限。
 
 下面只是 profile 里的字段片段，不要整段覆盖 `config.json`；请改对应 profile 下的 `permissions` 字段。
 
@@ -199,11 +212,13 @@ bridge 会检查所选目录存在、是目录，并且不是 `/`、Home 根、�
 
 模式映射：
 
-| Bridge access | Claude permission mode | Codex mode |
-|---|---|---|
-| `full` | `bypassPermissions` | `danger-full-access` |
-| `workspace` | `acceptEdits` | `workspace-write` |
-| `read-only` | `plan` | `read-only` |
+| Bridge access | Claude permission mode | Codex mode | Kimi ACP mode |
+|---|---|---|---|
+| `full` | `bypassPermissions` | `danger-full-access` | 无 Seatbelt；以本机用户权限开放 Shell 和文件读写/编辑 |
+| `workspace` | `acceptEdits` | `workspace-write` | Seatbelt；开放本机 Shell/进程执行，项目数据读写/编辑限当前激活 cwd |
+| `read-only` | `plan` | `read-only` | Seatbelt + ACP 只读；强制 `default/manual`；拒绝审批 |
+
+对 Kimi 而言，`full` 是显式的高风险选择：配置的工作区只是进程工作目录，不是文件系统边界。进程可执行任意本机命令，并访问 bridge 操作系统用户能访问的任何内容。建议使用独立的操作系统账号和 profile；除非能接受该暴露面，否则保持 `read-only`。附件仍会在下载前被拒绝，也不会写进 prompt。
 
 旧版 `sandbox` 字段仍可读取。bridge 保存 profile 后，会把该设置迁移为 canonical `permissions`。
 
@@ -249,7 +264,7 @@ bridge 会检查所选目录存在、是目录，并且不是 `/`、Home 根、�
 - **只给自己用** → 什么都不用做，默认就是。
 - **让某个同事能私聊 bot** → `/invite user @他`
 - **让某个工作群里所有人都能用** → 在那个群里发 `/invite group`
-- **第一次配，想把 bot 已经在的群一次性全开放** → 发 `/invite all group` 一键拉取 bot 所在的全部群加入名单，之后再用 `/remove group` 删掉不想要的
+- **第一次配置 Claude/Codex，想把 bot 已经在的群一次性全开放** → 发 `/invite all group` 一键拉取 bot 所在的全部群加入名单，之后再用 `/remove group` 删掉不想要的。Kimi profile 会拒绝该命令。
 - **再拉个人一起当管理员** → `/invite admin @他`
 
 ### 还需要知道的
@@ -258,6 +273,12 @@ bridge 会检查所选目录存在、是目录，并且不是 `/`、Home 根、�
 - **群里默认要先 @bot 才会回**（私聊不用 @）。这是另一个独立开关（`/config` →"群里需要 @ bot"），和上面的名单是两回事。
 - 陌生人发消息一律静默丢弃，不会有任何回复。唯一的例外：有人在一个还没开放的群里 @bot，bot 会回一句友好提示，告诉他可以让管理员发 `/invite group` 开放这个群。
 - 云文档评论按文档权限生效：能在支持的文档里评论并 @bot 的人可以触发回复。
+
+### Kimi 群聊试点建议
+
+Kimi 目前只建议在指定群或话题群中试点。用 `/invite group` 逐个开放群，保留“群里需要 @ bot”，并使用一份独立、脱敏、只包含获准向该试点群全员公开内容的工作区副本；不要直接指向宽范围生产仓库。Kimi profile 会对 `/invite all group` fail closed。群一旦加入 `allowedChats`，群内所有成员都会通过同一个本地服务账号触发 bot；bridge 当前不会额外校验租户成员身份、源码级数据权限，也没有逐用户配额。话题群按 thread 隔离会话，普通群则共享 chat 级会话，因此多人并发试点优先使用话题群。
+
+试点期间应保持低并发：Kimi 每轮 ACP 运行前会同步校验配置，校验期间可能暂停 bot 事件循环。控制台或遥测 instrumentation 必须在启动 Kimi profile 前安装；活跃 Kimi 运行期间不要热加载或热重载会替换 `console.error` 的 instrumentation，修改后应重启该 profile。
 
 ### 高级：直接改配置文件
 
@@ -290,13 +311,13 @@ grep '"event":"enter"' ~/.lark-channel/profiles/<profile>/logs/bridge-$(date +%Y
 
 ## 云文档评论
 
-云文档评论不再需要单独绑定工作目录或维护文档白名单。支持的文档评论里 @bot 后，bridge 会在同一个评论线程里回复。评论运行复用文档级 session key；没有记录过文档 cwd 时回退到用户 home 目录。
+云文档评论不再需要单独绑定工作目录或维护文档白名单。支持的文档评论里 @bot 后，bridge 会在同一个评论线程里回复。评论运行复用文档级 session key；没有记录过文档 cwd 时回退到用户 home 目录。Kimi ACP 试点暂不处理云文档评论。
 
 ## 常见问题
 
-**bot 没反应 / agent 不回复**：通常是本机 `claude` 或 `codex` CLI 没登录，或者当前会话指向了不存在的工作目录。发 `/status` 看当前状态；`/new` 重开会话往往就好。
+**bot 没反应 / agent 不回复**：通常是本机 `claude`、`codex` 或 `kimi` CLI 没登录，或者当前会话指向了不存在的工作目录。发 `/status` 看当前状态；`/new` 重开会话往往就好。
 
-**agent 子进程假死（卡片停在最后一帧不动）**：支持 idle 探活。agent 一段时间没输出就会被 SIGTERM kill，卡片末尾会标出自动终止原因。默认关闭。开启方式：`/config` 设全局值（分钟），或 `/timeout 10` 只对当前会话生效；`/timeout off` 关掉当前会话的探活；`/timeout default` 清掉会话覆盖，回退到全局设置。
+**agent 子进程假死（卡片停在最后一帧不动）**：默认启用 20 分钟 idle 探活。agent 在该窗口内没有任何事件，运行会被停止，卡片末尾会标出自动终止原因；工具调用同样受保护，缺失的 `tool_result` 不会再让探活永久暂停。可用 `/config` 修改全局值、`/timeout N` 覆盖当前会话；确需长时间静默时用 `/timeout off`，`/timeout default` 可清除会话覆盖。
 
 **图片发过去 agent 说看不到**：升级到最新版，0.1.0 之前的版本有文件名去重 bug。
 

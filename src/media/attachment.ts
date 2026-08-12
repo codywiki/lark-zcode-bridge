@@ -93,6 +93,14 @@ export function safeExtensionForMime(mime: string): string {
   return MIME_EXT[mime.toLowerCase()] ?? 'bin';
 }
 
+/** Conservative extension recovery from a sender-visible filename, used when
+ * the server content-type maps to 'bin' (e.g. .html / .docx) — otherwise the
+ * cached file lands on disk opaque and the agent can't tell what it is. */
+export function extensionFromFileName(name: string): string | undefined {
+  const match = /\.([A-Za-z0-9]{1,10})$/.exec(name.trim());
+  return match?.[1]?.toLowerCase();
+}
+
 export function toPolicyAttachment(attachment: NormalizedAttachment): PolicyAttachment {
   return {
     kind: attachment.kind,
@@ -113,6 +121,7 @@ export function toPromptAttachment(attachment: NormalizedAttachment): BridgeProm
     hash: attachment.hash,
     size: attachment.size,
     mime: attachment.mime,
+    ...(attachment.originalName ? { originalName: attachment.originalName } : {}),
     sourceMessageId: attachment.sourceMessageId,
     requiredness: attachment.requiredness,
     decision: attachment.decision,

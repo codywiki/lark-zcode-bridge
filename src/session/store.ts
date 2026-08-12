@@ -14,6 +14,13 @@ export interface SessionEntry {
    * scope, undefined = follow global default. Session resets preserve this
    * scope preference while removing the resumable session id/cwd. */
   idleTimeoutMinutes?: number;
+  /** Per-scope model override (id/alias passed as `--model` to the agent
+   * CLI). undefined = follow the agent's own default. Session resets
+   * preserve this scope preference, same as idleTimeoutMinutes. */
+  model?: string;
+  /** Per-scope reasoning effort override for agents that expose one.
+   * undefined = follow the agent's own default. */
+  reasoningEffort?: string;
 }
 
 type SessionMap = Record<string, SessionEntry>;
@@ -43,13 +50,23 @@ export class SessionStore {
         const cwd = typeof entry.cwd === 'string' ? entry.cwd : undefined;
         const idleTimeoutMinutes =
           typeof entry.idleTimeoutMinutes === 'number' ? entry.idleTimeoutMinutes : undefined;
+        const model = typeof entry.model === 'string' ? entry.model : undefined;
+        const reasoningEffort =
+          typeof entry.reasoningEffort === 'string' ? entry.reasoningEffort : undefined;
         const hasSession = sessionId !== undefined && cwd !== undefined;
-        if (!hasSession && idleTimeoutMinutes === undefined) continue;
+        if (
+          !hasSession &&
+          idleTimeoutMinutes === undefined &&
+          model === undefined &&
+          reasoningEffort === undefined
+        ) continue;
         this.data[chatId] = {
           ...(sessionId !== undefined ? { sessionId } : {}),
           ...(cwd !== undefined ? { cwd } : {}),
           updatedAt: entry.updatedAt,
           ...(idleTimeoutMinutes !== undefined ? { idleTimeoutMinutes } : {}),
+          ...(model !== undefined ? { model } : {}),
+          ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
         };
       }
     } catch (err) {
@@ -75,8 +92,9 @@ export class SessionStore {
   }
 
   set(chatId: string, sessionId: string, cwd: string): void {
-    // Preserve idleTimeoutMinutes across run starts — it's a per-scope
-    // preference, not per-run-instance state. /new (clear) wipes it.
+    // Preserve idleTimeoutMinutes/model/reasoning across run starts — they're
+    // per-scope preferences, not per-run-instance state. /new (clear) wipes
+    // idleTimeoutMinutes but not model/reasoning (see clear() below).
     const prev = this.data[chatId];
     this.data[chatId] = {
       sessionId,
@@ -85,6 +103,8 @@ export class SessionStore {
       ...(prev?.idleTimeoutMinutes !== undefined
         ? { idleTimeoutMinutes: prev.idleTimeoutMinutes }
         : {}),
+      ...(prev?.model !== undefined ? { model: prev.model } : {}),
+      ...(prev?.reasoningEffort !== undefined ? { reasoningEffort: prev.reasoningEffort } : {}),
     };
     this.schedulePersist();
   }
@@ -92,9 +112,17 @@ export class SessionStore {
   clear(chatId: string): void {
     const prev = this.data[chatId];
     if (!prev) return;
-    if (prev.idleTimeoutMinutes !== undefined) {
+    if (
+      prev.idleTimeoutMinutes !== undefined ||
+      prev.model !== undefined ||
+      prev.reasoningEffort !== undefined
+    ) {
       this.data[chatId] = {
-        idleTimeoutMinutes: prev.idleTimeoutMinutes,
+        ...(prev.idleTimeoutMinutes !== undefined
+          ? { idleTimeoutMinutes: prev.idleTimeoutMinutes }
+          : {}),
+        ...(prev.model !== undefined ? { model: prev.model } : {}),
+        ...(prev.reasoningEffort !== undefined ? { reasoningEffort: prev.reasoningEffort } : {}),
         updatedAt: Date.now(),
       };
     } else {
@@ -125,6 +153,57 @@ export class SessionStore {
     const prev = this.data[chatId];
     if (!prev || prev.idleTimeoutMinutes === undefined) return false;
     const { idleTimeoutMinutes: _, ...rest } = prev;
+    this.data[chatId] = { ...rest, updatedAt: Date.now() };
+    this.schedulePersist();
+    return true;
+  }
+
+  /** Per-scope model override. `undefined` means no override set. */
+  getModel(chatId: string): string | undefined {
+    return this.data[chatId]?.model;
+  }
+
+  setModel(chatId: string, model: string): void {
+    const prev = this.data[chatId];
+    this.data[chatId] = {
+      ...(prev ?? { updatedAt: Date.now() }),
+      model,
+      updatedAt: Date.now(),
+    };
+    this.schedulePersist();
+  }
+
+  /** Per-scope reasoning effort override. `undefined` means no override set. */
+  getReasoningEffort(chatId: string): string | undefined {
+    return this.data[chatId]?.reasoningEffort;
+  }
+
+  setReasoningEffort(chatId: string, effort: string): void {
+    const prev = this.data[chatId];
+    this.data[chatId] = {
+      ...(prev ?? { updatedAt: Date.now() }),
+      reasoningEffort: effort,
+      updatedAt: Date.now(),
+    };
+    this.schedulePersist();
+  }
+
+  /** Remove the reasoning override. Returns true if something was removed. */
+  clearReasoningEffortOverride(chatId: string): boolean {
+    const prev = this.data[chatId];
+    if (!prev || prev.reasoningEffort === undefined) return false;
+    const { reasoningEffort: _, ...rest } = prev;
+    this.data[chatId] = { ...rest, updatedAt: Date.now() };
+    this.schedulePersist();
+    return true;
+  }
+
+  /** Remove the override so this scope falls back to the agent's own
+   * default model. Returns true if something was actually removed. */
+  clearModelOverride(chatId: string): boolean {
+    const prev = this.data[chatId];
+    if (!prev || prev.model === undefined) return false;
+    const { model: _, ...rest } = prev;
     this.data[chatId] = { ...rest, updatedAt: Date.now() };
     this.schedulePersist();
     return true;

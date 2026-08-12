@@ -4,7 +4,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { NormalizedMessage } from '@larksuite/channel';
 import { ActiveRuns } from '../../../src/bot/active-runs.js';
 import { tryHandleCommand, type CommandContext, type Controls } from '../../../src/commands/index.js';
-import { createDefaultProfileConfig, type ProfileConfig } from '../../../src/config/profile-schema.js';
+import {
+  createDefaultProfileConfig,
+  type AgentKind,
+  type ProfileConfig,
+} from '../../../src/config/profile-schema.js';
 import { createRootConfig, loadRootConfig, saveRootConfig } from '../../../src/config/profile-store.js';
 import { SessionStore } from '../../../src/session/store.js';
 import { WorkspaceStore } from '../../../src/workspace/store.js';
@@ -121,6 +125,164 @@ describe('Bridge command contracts', () => {
 
     await expect(h.run('/ws save mine', { senderId: 'ou-not-admin' })).resolves.toBe(true);
     expect(lastMarkdown(h.channel)).toContain('仅管理员可用');
+  });
+
+  it('allows Kimi directory commands in any profile-authorized workspace root', async () => {
+    const h = await createHarness('kimi');
+    const child = join(h.tmp.workspace, 'packages', 'app');
+    const additionalRoot = join(h.tmp.root, 'authorized-project');
+    const additionalChild = join(additionalRoot, 'packages', 'app');
+    const outside = join(h.tmp.root, 'outside-project');
+    await Promise.all([
+      mkdir(child, { recursive: true }),
+      mkdir(additionalChild, { recursive: true }),
+      mkdir(outside, { recursive: true }),
+    ]);
+    h.controls.profileConfig.workspaces.allowedRoots = [await realpath(additionalRoot)];
+
+    await expect(h.run(`/cd ${child}`)).resolves.toBe(true);
+    expect(h.workspaces.cwdFor('chat-1')).toBe(await realpath(child));
+
+    await expect(h.run(`/cd ${additionalChild}`)).resolves.toBe(true);
+    expect(h.workspaces.cwdFor('chat-1')).toBe(await realpath(additionalChild));
+    await expect(h.run('/ws save secondary')).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain(await realpath(additionalChild));
+
+    h.sessions.set('chat-1', 'session-must-survive-denial', await realpath(additionalChild));
+    await expect(h.run(`/cd ${outside}`)).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('Profile 授权工作目录及其子目录');
+    expect(lastMarkdown(h.channel)).not.toContain(outside);
+    expect(h.workspaces.cwdFor('chat-1')).toBe(await realpath(additionalChild));
+    expect(h.sessions.resumeFor('chat-1', await realpath(additionalChild))).toBe(
+      'session-must-survive-denial',
+    );
+
+    h.workspaces.setCwd('chat-1', outside);
+    await expect(h.run('/ws save escaped')).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('Profile 授权工作目录及其子目录');
+    expect(lastMarkdown(h.channel)).not.toContain(outside);
+    expect(Object.values(h.workspaces.listNamed())).not.toContain(await realpath(outside));
+
+    h.workspaces.setCwd('chat-1', child);
+    h.workspaces.saveNamed('legacy-outside', outside);
+    await expect(h.run('/ws use legacy-outside')).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('Profile 授权工作目录及其子目录');
+    expect(lastMarkdown(h.channel)).not.toContain(outside);
+    expect(h.workspaces.cwdFor('chat-1')).toBe(child);
+
+    await expect(h.run('/ws')).resolves.toBe(true);
+    const card = JSON.stringify(lastContent(h.channel));
+    expect(card).toContain(jsonStringFragment(await realpath(additionalChild)));
+    expect(card).not.toContain(jsonStringFragment(outside));
+
+    await expect(h.run('/ws use secondary')).resolves.toBe(true);
+    expect(h.workspaces.cwdFor('chat-1')).toBe(await realpath(additionalChild));
+  });
+
+  it('does not inherit or render a Kimi cwd whose authorization was revoked in /new chat', async () => {
+    const h = await createHarness('kimi');
+    const revoked = join(h.tmp.root, 'revoked-project');
+    await mkdir(revoked, { recursive: true });
+    h.workspaces.setCwd('chat-1', revoked);
+    const createChat = vi
+      .fn()
+      .mockResolvedValueOnce({ chatId: 'chat-new' })
+      .mockResolvedValueOnce({ chatId: 'chat-authorized' });
+    Object.assign(h.channel, {
+      createChat,
+    });
+
+    await expect(h.run('/new chat Isolated')).resolves.toBe(true);
+
+    expect(h.workspaces.cwdFor('chat-new')).toBeUndefined();
+    const welcome = h.channel.sent.find((message) => message.chatId === 'chat-new');
+    expect(JSON.stringify(welcome?.content)).toContain('群已建好');
+    expect(JSON.stringify(welcome?.content)).not.toContain(revoked);
+
+    const authorized = await realpath(h.tmp.workspace);
+    h.workspaces.setCwd('chat-1', authorized);
+    await expect(h.run('/new chat Authorized')).resolves.toBe(true);
+
+    expect(h.workspaces.cwdFor('chat-authorized')).toBe(authorized);
+    const authorizedWelcome = h.channel.sent.find(
+      (message) => message.chatId === 'chat-authorized',
+    );
+    expect(JSON.stringify(authorizedWelcome?.content)).toContain('已继承获授权工作目录');
+    expect(JSON.stringify(authorizedWelcome?.content)).not.toContain(authorized);
+  });
+
+  it('keeps Kimi group /cd and /ws save/use admin-only', async () => {
+    const h = await createHarness('kimi');
+    const child = join(h.tmp.workspace, 'packages');
+    await mkdir(child, { recursive: true });
+
+    await expect(
+      h.run(`/cd ${child}`, { senderId: 'ou-not-admin', chatMode: 'group' }),
+    ).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('仅管理员可用');
+    expect(h.workspaces.cwdFor('chat-1')).toBe(await realpath(h.tmp.workspace));
+
+    await expect(
+      h.run('/ws save group', { senderId: 'ou-not-admin', chatMode: 'group' }),
+    ).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('仅管理员可用');
+
+    h.workspaces.saveNamed('legacy-child', child);
+    await expect(
+      h.run('/ws use legacy-child', { senderId: 'ou-not-admin', chatMode: 'group' }),
+    ).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('仅管理员可用');
+    expect(h.workspaces.cwdFor('chat-1')).toBe(await realpath(h.tmp.workspace));
+  });
+
+  it('keeps Kimi group session-state commands admin-only', async () => {
+    const h = await createHarness('kimi');
+    const cwd = await realpath(h.tmp.workspace);
+
+    for (const command of ['/new', '/reset', '/stop', '/timeout 15', '/model kimi-k2']) {
+      h.sessions.set('chat-1', 'sess-protected', cwd);
+      await expect(
+        h.run(command, { senderId: 'ou-not-admin', chatMode: 'group' }),
+      ).resolves.toBe(true);
+      expect(lastMarkdown(h.channel)).toContain('仅管理员可用');
+      expect(h.sessions.resumeFor('chat-1', cwd)).toBe('sess-protected');
+      expect(h.sessions.getIdleTimeoutMinutes('chat-1')).toBeUndefined();
+      expect(h.sessions.getModel('chat-1')).toBeUndefined();
+    }
+
+    await expect(h.run('/timeout 15', { chatMode: 'group' })).resolves.toBe(true);
+    expect(h.sessions.getIdleTimeoutMinutes('chat-1')).toBe(15);
+    await expect(h.run('/model kimi-k2', { chatMode: 'group' })).resolves.toBe(true);
+    expect(h.sessions.getModel('chat-1')).toBe('kimi-k2');
+  });
+
+  it('does not apply the Kimi group-only state gate to p2p or other agents', async () => {
+    const kimi = await createHarness('kimi');
+    const kimiCwd = await realpath(kimi.tmp.workspace);
+    kimi.sessions.set('chat-1', 'sess-p2p', kimiCwd);
+
+    await expect(
+      kimi.run('/new', { senderId: 'ou-owner', chatMode: 'p2p' }),
+    ).resolves.toBe(true);
+    expect(kimi.sessions.resumeFor('chat-1', kimiCwd)).toBeUndefined();
+
+    const claude = await createHarness('claude');
+    await expect(
+      claude.run('/timeout 12', { senderId: 'ou-not-admin', chatMode: 'group' }),
+    ).resolves.toBe(true);
+    expect(claude.sessions.getIdleTimeoutMinutes('chat-1')).toBe(12);
+  });
+
+  it('rejects Kimi /skill: activation case-insensitively without affecting Claude', async () => {
+    const kimi = await createHarness('kimi');
+
+    await expect(kimi.run('   /SKILL:local-secret')).resolves.toBe(true);
+    expect(lastMarkdown(kimi.channel)).toContain('不允许通过 `/skill:` 激活本地 skill');
+    expect(kimi.agent.runOptions).toEqual([]);
+
+    const claude = await createHarness('claude');
+    await expect(claude.run('   /SKILL:local-secret')).resolves.toBe(false);
+    expect(claude.channel.sent).toEqual([]);
   });
 
   it('does not expose authorization root management commands', async () => {
@@ -248,6 +410,19 @@ describe('Bridge command contracts', () => {
     expect(status).toContain('chat-1');
   });
 
+  it('redacts Kimi cwd and session details from group /status', async () => {
+    const h = await createHarness('kimi');
+    const cwd = await realpath(h.tmp.workspace);
+    h.sessions.set('chat-1', 'sess-sensitive-secret', cwd);
+
+    await expect(h.run('/status', { chatMode: 'group' })).resolves.toBe(true);
+
+    const status = JSON.stringify(lastContent(h.channel));
+    expect(status).toContain('群聊已隐藏');
+    expect(status).not.toContain(jsonStringFragment(cwd));
+    expect(status).not.toContain('sess-sen');
+  });
+
   it('rejects admin-only commands for non owner/admin users', async () => {
     const h = await createHarness();
 
@@ -299,6 +474,46 @@ describe('Bridge command contracts', () => {
     expect(root?.profiles.claude?.access.allowedUsers).not.toContain('ou-alice');
   });
 
+  it('reports an /invite persistence failure instead of silently swallowing it', async () => {
+    const h = await createHarness();
+    await writeFile(h.controls.configPath, '{ invalid json', 'utf8');
+
+    await expect(
+      h.run('/invite group', {
+        chatId: 'oc-group-1',
+        scope: 'oc-group-1',
+        chatMode: 'group',
+      }),
+    ).resolves.toBe(true);
+
+    expect(lastMarkdown(h.channel)).toContain('命令处理失败');
+    expect(lastMarkdown(h.channel)).toContain('bridge 日志');
+  });
+
+  it('lets a Codex runtime update access when the shared config also contains Kimi', async () => {
+    const h = await createHarness('codex');
+    const root = await loadRootConfig(h.controls.configPath);
+    expect(root).toBeDefined();
+    root!.profiles.kimi = appConfig(await realpath(h.tmp.workspace), 'kimi');
+    await saveRootConfig(root!, h.controls.configPath);
+
+    await expect(
+      h.run('/invite user @Alice', { mentions: [mention('ou-alice', 'Alice')] }),
+    ).resolves.toBe(true);
+    await expect(
+      h.run('/invite group', {
+        chatId: 'oc-group-1',
+        scope: 'oc-group-1',
+        chatMode: 'group',
+      }),
+    ).resolves.toBe(true);
+
+    const saved = await loadRootConfig(h.controls.configPath);
+    expect(saved?.profiles.codex?.access.allowedUsers).toContain('ou-alice');
+    expect(saved?.profiles.codex?.access.allowedChats).toContain('oc-group-1');
+    expect(saved?.profiles.kimi?.agentKind).toBe('kimi');
+  });
+
   it('adds every known bot group through /invite all group', async () => {
     const h = await createHarness();
     h.controls.knownChats = [
@@ -311,9 +526,24 @@ describe('Bridge command contracts', () => {
     const root = await loadRootConfig(h.controls.configPath);
     expect(root?.profiles.claude?.access.allowedChats).toEqual(['oc-group-1', 'oc-group-2']);
   });
+
+  it('fails closed when a Kimi profile tries /invite all group', async () => {
+    const h = await createHarness('kimi');
+    h.controls.knownChats = [
+      { id: 'oc-group-1', name: 'Group One' },
+      { id: 'oc-group-2', name: 'Group Two' },
+    ];
+
+    await expect(h.run('/invite all group')).resolves.toBe(true);
+
+    const root = await loadRootConfig(h.controls.configPath);
+    expect(root?.profiles.kimi?.access.allowedChats).toEqual([]);
+    expect(lastMarkdown(h.channel)).toContain('Kimi profile 禁止批量开放群聊');
+    expect(lastMarkdown(h.channel)).toContain('/invite group');
+  });
 });
 
-async function createHarness(): Promise<Harness> {
+async function createHarness(agentKind: AgentKind = 'claude'): Promise<Harness> {
   const tmp = await createTmpProfile('commands-v1-');
   const channel = createFakeChannel();
   const sessions = new SessionStore(join(tmp.profile, 'sessions.json'));
@@ -321,11 +551,12 @@ async function createHarness(): Promise<Harness> {
   const activeRuns = new ActiveRuns();
   const agent = createFakeAgent();
   const workspaceRealpath = await realpath(tmp.workspace);
-  const profileConfig = appConfig(workspaceRealpath);
+  const profileConfig = appConfig(workspaceRealpath, agentKind);
+  const profile = agentKind;
   const configPath = join(tmp.root, 'config.json');
-  await saveRootConfig(createRootConfig('claude', profileConfig), configPath);
+  await saveRootConfig(createRootConfig(profile, profileConfig), configPath);
   const controls = {
-    profile: 'claude',
+    profile,
     profileConfig,
     botOwnerId: 'ou-owner',
     ownerRefreshState: 'ok',
@@ -368,13 +599,15 @@ async function createHarness(): Promise<Harness> {
   return { tmp, channel, sessions, workspaces, activeRuns, agent, controls, run };
 }
 
-function appConfig(defaultWorkspace: string): ProfileConfig {
+function appConfig(defaultWorkspace: string, agentKind: AgentKind): ProfileConfig {
   const config = createDefaultProfileConfig({
-    agentKind: 'claude',
+    agentKind,
     accounts: { app: { id: 'app-id', secret: 'secret', tenant: 'feishu' } },
     access: { admins: ['ou-admin'] },
     sandbox: { defaultMode: 'read-only', maxMode: 'workspace-write' },
     preferences: { maxConcurrentRuns: 2 },
+    ...(agentKind === 'codex' ? { codex: { binaryPath: 'codex' } } : {}),
+    ...(agentKind === 'kimi' ? { kimi: { binaryPath: 'kimi' } } : {}),
   });
   config.workspaces.default = defaultWorkspace;
   return config;

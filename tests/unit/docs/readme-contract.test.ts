@@ -8,6 +8,7 @@ describe('README runtime contract', () => {
     for (const phrase of [
       'per-profile service',
       'workspaces.default',
+      'workspaces.allowedRoots',
       '/invite user',
       '/remove user',
       '/invite group',
@@ -45,23 +46,23 @@ describe('README runtime contract', () => {
     expect(configCard).not.toContain('`/doc`');
   });
 
-  it('does not document trusted or allowed directory authorization', async () => {
+  it('documents local profile root authorization without remote expansion commands', async () => {
     const docs = await readDocs();
 
     for (const phrase of [
-      '允许访问目录',
       '可信目录',
       '安全目录',
       'trustedRoots',
       '/ws add',
       '/ws remove --root',
-      'allowed directory',
-      'allowed directories',
       'trusted directory',
       'safe directory',
     ]) {
       expect(docs).not.toContain(phrase);
     }
+    expect(docs).toContain('群聊命令不能扩大白名单');
+    expect(docs).toContain('chat commands cannot expand this allowlist');
+    expect(docs).toContain('单次运行只会拿到当前选中的一个规范化工作目录');
   });
 
   it('documents access control commands instead of config-only access management', async () => {
@@ -90,6 +91,27 @@ describe('README runtime contract', () => {
     expect(docs).toContain('legacy `sandbox`');
     expect(docs).toContain('旧版 `sandbox`');
     expect(docs).not.toContain('"sandbox"');
+  });
+
+  it('documents Kimi read-only defaults and the explicit unsandboxed full-access risk', async () => {
+    const docs = await readDocs();
+
+    expect(docs).toContain('New Kimi profiles default to read-only');
+    expect(docs).toContain('every bot ACP run and its pre-run Kimi config validation is wrapped in macOS Seatbelt');
+    expect(docs).toContain('Direct workspace file data is denied to the Kimi process');
+    expect(docs).toContain('disables writes, process execution, attachments, MCP, subagents, skills, hooks, and plugins');
+    expect(docs).toContain('Explicitly setting both Kimi permission values to `full` opts into local Shell and file read/write/edit tools without Seatbelt');
+    expect(docs).toContain('Full mode runs with the bridge OS user\'s permissions and is not restricted to the selected workspace');
+    expect(docs).toContain('Kimi `workspace` mode keeps Seatbelt, allows local Shell/process execution, and limits project-data reads and writes to the active current working directory');
+    expect(docs).toContain('新建 Kimi profile 默认仍是只读模式');
+    expect(docs).toContain('在该模式下，每次 bot ACP 运行及其运行前 Kimi 配置校验都会进入 macOS Seatbelt');
+    expect(docs).toContain('Kimi 子进程不能直接读取工作区正文');
+    expect(docs).toContain('禁用写入、进程执行、附件、MCP、子 Agent、Skill、hook 和 plugin');
+    expect(docs).toContain('只有将 Kimi 的两个权限值都显式设为 `full`，才会不启用 Seatbelt');
+    expect(docs).toContain('full 模式拥有 bridge 操作系统用户的权限，不受所选工作区限制');
+    expect(docs).toContain('Kimi 的 `workspace` 模式保留 Seatbelt，允许本机 Shell/进程执行，并将项目数据的读写限制在当前激活工作目录内');
+    expect(docs).not.toContain('all three stored access values collapse');
+    expect(docs).not.toContain('三个配置值都会收敛到同一套');
   });
 });
 

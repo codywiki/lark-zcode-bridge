@@ -42,6 +42,7 @@
     "prepublishOnly": "pnpm typecheck && pnpm build"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "0.23.0",
     "@clack/prompts": "^1.4.0",
     "@larksuite/channel": "^0.2.0",
     "commander": "^12.1.0",
@@ -75,6 +76,8 @@
     "claude",
     "claude-code",
     "codex",
+    "kimi",
+    "kimi-code",
     "cli",
     "channel",
     "bridge"

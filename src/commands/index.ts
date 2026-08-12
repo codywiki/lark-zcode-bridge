@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
-import { claudeCapability, codexCapability } from '../agent/capability';
+import { capabilityForProfile } from '../agent/capability';
 import type { AgentAdapter } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
 import {
@@ -69,7 +69,7 @@ import {
 import type { SessionCatalog, SessionCatalogIdentity } from '../session/catalog';
 import { isAlive, readAndPrune, resolveTarget } from '../runtime/registry';
 import type { SessionStore } from '../session/store';
-import { resolveWorkingDirectory } from '../policy/workspace';
+import { resolveAuthorizedWorkingDirectory } from '../policy/workspace';
 import { evaluateRunPolicy } from '../policy/run-policy';
 import type { ProcessPool } from '../bot/process-pool';
 import type { RunExecutor } from '../runtime/run-executor';
@@ -144,7 +144,7 @@ type Handler = (args: string, ctx: CommandContext) => Promise<void>;
 
 interface ResumeCandidate {
   scopeId: string;
-  agentId: 'claude' | 'codex';
+  agentId: 'claude' | 'codex' | 'kimi';
   cwdRealpath: string;
   policyFingerprint: string;
   sessionId?: string;
@@ -155,6 +155,7 @@ interface ResumeCandidate {
 const RESUME_CANDIDATE_TTL_MS = 10 * 60 * 1000;
 const resumeCandidates = new Map<string, ResumeCandidate>();
 const AUDIT_SAFE_COMMAND_REPLY = '命令已处理。';
+const COMMAND_FAILED_REPLY = '❌ 命令处理失败，请稍后重试。详情已记录到 bridge 日志。';
 const RESUME_APPLIED_REPLY = '已完成，请继续发送下一条消息。';
 
 const handlers: Record<string, Handler> = {
@@ -169,6 +170,7 @@ const handlers: Record<string, Handler> = {
   '/config': handleConfig,
   '/stop': handleStop,
   '/timeout': handleTimeout,
+  '/model': handleModel,
   '/ps': handlePs,
   '/exit': handleExit,
   '/doctor': handleDoctor,
@@ -195,21 +197,40 @@ const ADMIN_COMMANDS = new Set([
   '/invite',
   '/remove',
 ]);
+const KIMI_GROUP_ADMIN_COMMANDS = new Set(['/new', '/reset', '/stop', '/timeout', '/model']);
 
 function isAdminCommand(cmd: string): boolean {
   return ADMIN_COMMANDS.has(cmd.startsWith('/') ? cmd : `/${cmd}`);
 }
 
+function requiresAdminCommand(cmd: string, ctx: CommandContext): boolean {
+  const normalized = cmd.startsWith('/') ? cmd : `/${cmd}`;
+  return (
+    isAdminCommand(normalized) ||
+    (ctx.controls.profileConfig.agentKind === 'kimi' &&
+      ctx.chatMode !== 'p2p' &&
+      KIMI_GROUP_ADMIN_COMMANDS.has(normalized))
+  );
+}
+
 export async function tryHandleCommand(ctx: CommandContext): Promise<boolean> {
   const trimmed = ctx.msg.content.trim();
   if (!trimmed.startsWith('/')) return false;
+  if (
+    ctx.controls.profileConfig.agentKind === 'kimi' &&
+    trimmed.toLowerCase().startsWith('/skill:')
+  ) {
+    log.info('command', 'kimi-skill-deny', { sender: ctx.msg.senderId.slice(-6) });
+    await reply(ctx, '❌ Kimi 试点暂不允许通过 `/skill:` 激活本地 skill。');
+    return true;
+  }
   const parts = trimmed.split(/\s+/);
   const cmd = parts[0] ?? '';
   const args = parts.slice(1).join(' ');
   const h = handlers[cmd];
   if (!h) return false;
   if (
-    isAdminCommand(cmd) &&
+    requiresAdminCommand(cmd, ctx) &&
     !canRunAdminCommand(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId).ok
   ) {
     log.info('command', 'admin-deny', {
@@ -224,6 +245,7 @@ export async function tryHandleCommand(ctx: CommandContext): Promise<boolean> {
   } catch (err) {
     log.fail('command', err, { cmd });
     reportMetric('command_fail', 1, { step: 'dispatch' });
+    await reply(ctx, COMMAND_FAILED_REPLY);
   }
   return true;
 }
@@ -237,7 +259,7 @@ export async function runCommandHandler(
   const h = handlers[`/${name}`];
   if (!h) return false;
   if (
-    isAdminCommand(name) &&
+    requiresAdminCommand(name, ctx) &&
     !canRunAdminCommand(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId).ok
   ) {
     log.info('command', 'admin-deny', {
@@ -302,6 +324,12 @@ function isAbsoluteOrTilde(p: string): boolean {
   return isAbsolute(p) || p === '~' || p.startsWith('~/');
 }
 
+function storedWorkspaceFailureMessage(ctx: CommandContext, userVisible: string): string {
+  return ctx.controls.profileConfig.agentKind === 'kimi'
+    ? 'Kimi 当前工作目录不可用，或不在 Profile 授权工作目录及其子目录中。'
+    : userVisible;
+}
+
 async function handleNew(args: string, ctx: CommandContext): Promise<void> {
   const trimmed = args.trim();
 
@@ -323,7 +351,10 @@ async function handleNew(args: string, ctx: CommandContext): Promise<void> {
 }
 
 async function handleNewChat(rawName: string, ctx: CommandContext): Promise<void> {
-  const sourceCwd = effectiveWorkspaceCwd(ctx);
+  // A persisted cwd may outlive a profile authorization change. Only inherit
+  // it when it is still authorized; otherwise create a clean chat without
+  // copying or rendering the stale local path.
+  const sourceCwd = await authorizedEffectiveWorkspaceCwd(ctx);
   const name = rawName || defaultChatName(ctx.agent.displayName);
 
   let created;
@@ -340,14 +371,16 @@ async function handleNewChat(rawName: string, ctx: CommandContext): Promise<void
   }
 
   // Inherit cwd from the originating chat so the new group starts in the
-  // same workspace; otherwise it'll fall back to $HOME.
+  // same workspace; otherwise the run flow falls back to the profile default.
   if (sourceCwd) {
     ctx.workspaces.setCwd(created.chatId, sourceCwd);
   }
 
   // Welcome the user inside the new group with a hint about how to start.
   const welcome = sourceCwd
-    ? `🎉 群已建好，cwd 继承自原群：\`${sourceCwd}\`\n\n@我 + 任意消息开始对话。`
+    ? ctx.controls.profileConfig.agentKind === 'kimi'
+      ? '🎉 群已建好，已继承获授权工作目录。\n\n@我 + 任意消息开始对话。'
+      : `🎉 群已建好，cwd 继承自原群：\`${sourceCwd}\`\n\n@我 + 任意消息开始对话。`
     : '🎉 群已建好。\n\n@我 + 任意消息开始对话。';
   try {
     await ctx.channel.send(created.chatId, { markdown: welcome });
@@ -372,7 +405,10 @@ async function handleCd(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
   const absolute = expandTilde(input);
-  const workspace = await resolveWorkingDirectory(absolute);
+  const workspace = await resolveAuthorizedWorkingDirectory(
+    absolute,
+    ctx.controls.profileConfig,
+  );
   if (!workspace.ok) {
     await reply(ctx, workspace.userVisible);
     return;
@@ -404,8 +440,10 @@ async function handleWs(args: string, ctx: CommandContext): Promise<void> {
 }
 
 async function handleWsList(ctx: CommandContext): Promise<void> {
-  const named = listScopedWorkspaces(ctx);
-  const currentCwd = effectiveWorkspaceCwd(ctx);
+  const [named, currentCwd] = await Promise.all([
+    listAuthorizedScopedWorkspaces(ctx),
+    authorizedEffectiveWorkspaceCwd(ctx),
+  ]);
   const card = workspacesCard(
     currentCwd,
     named,
@@ -423,8 +461,13 @@ async function handleWsSave(name: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, '当前 chat 未设置 cwd，先用 `/cd` 设置再保存。');
     return;
   }
-  ctx.workspaces.saveNamed(scopedWorkspaceName(ctx, name), cwd);
-  await reply(ctx, `✓ 工作目录别名已保存：\`${name}\` → ${cwd}`);
+  const workspace = await resolveAuthorizedWorkingDirectory(cwd, ctx.controls.profileConfig);
+  if (!workspace.ok) {
+    await reply(ctx, storedWorkspaceFailureMessage(ctx, workspace.userVisible));
+    return;
+  }
+  ctx.workspaces.saveNamed(scopedWorkspaceName(ctx, name), workspace.cwdRealpath);
+  await reply(ctx, `✓ 工作目录别名已保存：\`${name}\` → ${workspace.cwdRealpath}`);
 }
 
 async function handleWsUse(name: string, ctx: CommandContext): Promise<void> {
@@ -437,9 +480,9 @@ async function handleWsUse(name: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, `未找到工作目录别名：\`${name}\``);
     return;
   }
-  const workspace = await resolveWorkingDirectory(cwd);
+  const workspace = await resolveAuthorizedWorkingDirectory(cwd, ctx.controls.profileConfig);
   if (!workspace.ok) {
-    await reply(ctx, workspace.userVisible);
+    await reply(ctx, storedWorkspaceFailureMessage(ctx, workspace.userVisible));
     return;
   }
   ctx.activeRuns.interrupt(ctx.scope);
@@ -462,6 +505,10 @@ async function handleWsRemove(name: string, ctx: CommandContext): Promise<void> 
 
 async function handleDoc(args: string, ctx: CommandContext): Promise<void> {
   void args;
+  if (ctx.controls.profileConfig.agentKind === 'kimi') {
+    await reply(ctx, 'Kimi ACP 试点暂不处理云文档评论；请在已授权群聊或话题中 @bot。');
+    return;
+  }
   await reply(ctx, '云文档评论现在不需要绑定工作区；在支持的文档评论里 @bot 即可触发回复。');
 }
 
@@ -513,6 +560,24 @@ function listScopedWorkspaces(ctx: CommandContext): Record<string, string> {
   return scoped;
 }
 
+async function listAuthorizedScopedWorkspaces(
+  ctx: CommandContext,
+): Promise<Record<string, string>> {
+  const named = listScopedWorkspaces(ctx);
+  if (ctx.controls.profileConfig.agentKind !== 'kimi') return named;
+
+  const checked = await Promise.all(
+    Object.entries(named).map(async ([name, cwd]) => {
+      const workspace = await resolveAuthorizedWorkingDirectory(
+        cwd,
+        ctx.controls.profileConfig,
+      );
+      return workspace.ok ? ([name, workspace.cwdRealpath] as const) : undefined;
+    }),
+  );
+  return Object.fromEntries(checked.filter((entry) => entry !== undefined));
+}
+
 async function handleResume(args: string, ctx: CommandContext): Promise<void> {
   const parts = args.trim().split(/\s+/).filter(Boolean);
   const sub = parts[0] ?? '';
@@ -526,7 +591,7 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
   const n = Number.parseInt(sub, 10);
   const limit = Number.isFinite(n) && n > 0 && n <= 20 ? n : 5;
 
-  const cwd = selectedResumeCwd(ctx);
+  const cwd = await selectedResumeCwd(ctx);
   if (!cwd) {
     await reply(ctx, '请先使用 /cd <path> 选择工作目录，再查看或恢复会话。');
     return;
@@ -538,7 +603,7 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
   }
 
   if (ctx.controls.profileConfig.agentKind === 'codex') {
-    const identity = ctx.sessionCatalogIdentity;
+    const identity = sessionCatalogIdentityForCwd(ctx, cwd);
     const entry =
       ctx.sessionCatalog && identity
         ? ctx.sessionCatalog.activeFor(identity)
@@ -572,9 +637,31 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
 
+  if (ctx.controls.profileConfig.agentKind === 'kimi') {
+    const identity = sessionCatalogIdentityForCwd(ctx, cwd);
+    const entry =
+      ctx.sessionCatalog && identity
+        ? ctx.sessionCatalog.activeFor(identity)
+        : undefined;
+    if (entry?.sessionId && identity) {
+      const nonce = issueResumeCandidate(identity, { sessionId: entry.sessionId });
+      await reply(
+        ctx,
+        `当前 Kimi session 可恢复。\n使用 \`/resume use ${nonce}\` 恢复（10 分钟内有效）。`,
+      );
+      return;
+    }
+    await ctx.channel.send(
+      ctx.msg.chatId,
+      { card: resumeCard(cwd, []) },
+      { replyTo: ctx.msg.messageId },
+    );
+    return;
+  }
+
   const sessions = await listClaudeResumeHistory(ctx, cwd, limit);
   const currentSession = ctx.sessions.getRaw(ctx.scope);
-  const identity = ctx.sessionCatalogIdentity;
+  const identity = sessionCatalogIdentityForCwd(ctx, cwd);
   const entries = sessions.map((s) => ({
     sessionId: identity
       ? issueResumeCandidate(identity, { sessionId: s.sessionId })
@@ -590,6 +677,18 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
 }
 
 async function applyResume(sessionId: string, ctx: CommandContext): Promise<void> {
+  const selectedCwd = await selectedResumeCwd(ctx);
+  if (!selectedCwd) {
+    await reply(ctx, '请先使用 /cd <path> 选择工作目录，再查看或恢复会话。');
+    return;
+  }
+  if (
+    ctx.sessionCatalogIdentity &&
+    ctx.sessionCatalogIdentity.cwdRealpath !== selectedCwd
+  ) {
+    await reply(ctx, '当前上下文不可恢复这个会话，请先用 `/resume` 重新生成恢复候选。');
+    return;
+  }
   if (ctx.sessionCatalog && ctx.sessionCatalogIdentity) {
     const entry = ctx.sessionCatalog.activeFor(ctx.sessionCatalogIdentity);
     const resolved = consumeResumeCandidate(sessionId, ctx.sessionCatalogIdentity);
@@ -606,7 +705,7 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
       } else {
         ctx.sessionCatalog.upsertActive({
           scopeId: ctx.sessionCatalogIdentity.scopeId,
-          agentId: 'claude',
+          agentId: ctx.sessionCatalogIdentity.agentId,
           cwdRealpath: ctx.sessionCatalogIdentity.cwdRealpath,
           policyFingerprint: ctx.sessionCatalogIdentity.policyFingerprint,
           sessionId: resolved.sessionId!,
@@ -626,25 +725,29 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
       return;
     }
     ctx.activeRuns.interrupt(ctx.scope);
-    if (ctx.sessionCatalogIdentity.agentId === 'claude') {
+    if (
+      ctx.sessionCatalogIdentity.agentId === 'claude' ||
+      ctx.sessionCatalogIdentity.agentId === 'kimi'
+    ) {
       ctx.sessions.set(ctx.scope, sessionId, ctx.sessionCatalogIdentity.cwdRealpath);
     }
     await reply(ctx, RESUME_APPLIED_REPLY);
     return;
   }
 
-  if (ctx.controls.profileConfig.agentKind === 'codex') {
-    await reply(ctx, '当前上下文没有可恢复的 Codex thread，请先在当前工作区完成一次运行。');
+  const agentKind = ctx.controls.profileConfig.agentKind;
+  if (agentKind === 'codex' || (agentKind === 'kimi' && ctx.sessionCatalog)) {
+    await reply(
+      ctx,
+      agentKind === 'codex'
+        ? '当前上下文没有可恢复的 Codex thread，请先在当前工作区完成一次运行。'
+        : '当前上下文没有符合当前工作区和权限策略的 Kimi session。',
+    );
     return;
   }
 
-  const cwd = selectedResumeCwd(ctx);
-  if (!cwd) {
-    await reply(ctx, '请先使用 /cd <path> 选择工作目录，再查看或恢复会话。');
-    return;
-  }
   ctx.activeRuns.interrupt(ctx.scope);
-  ctx.sessions.set(ctx.scope, sessionId, cwd);
+  ctx.sessions.set(ctx.scope, sessionId, selectedCwd);
   await reply(ctx, RESUME_APPLIED_REPLY);
 }
 
@@ -679,7 +782,8 @@ function consumeResumeCandidate(
     candidate.agentId !== identity.agentId ||
     candidate.cwdRealpath !== identity.cwdRealpath ||
     candidate.policyFingerprint !== identity.policyFingerprint ||
-    (identity.agentId === 'claude' && !candidate.sessionId) ||
+    ((identity.agentId === 'claude' || identity.agentId === 'kimi') &&
+      !candidate.sessionId) ||
     (identity.agentId === 'codex' && !candidate.threadId)
   ) {
     return undefined;
@@ -735,8 +839,28 @@ function effectiveWorkspaceCwd(ctx: CommandContext): string | undefined {
   return ctx.workspaces.cwdFor(ctx.scope) ?? ctx.controls.profileConfig.workspaces.default;
 }
 
-function selectedResumeCwd(ctx: CommandContext): string | undefined {
-  return effectiveWorkspaceCwd(ctx);
+async function authorizedEffectiveWorkspaceCwd(
+  ctx: CommandContext,
+): Promise<string | undefined> {
+  const cwd = effectiveWorkspaceCwd(ctx);
+  if (!cwd) return undefined;
+  // Claude/Codex do not use Profile workspace-root authorization, and their
+  // legacy SessionStore keys may intentionally retain the configured path.
+  if (ctx.controls.profileConfig.agentKind !== 'kimi') return cwd;
+  const workspace = await resolveAuthorizedWorkingDirectory(cwd, ctx.controls.profileConfig);
+  return workspace.ok ? workspace.cwdRealpath : undefined;
+}
+
+async function selectedResumeCwd(ctx: CommandContext): Promise<string | undefined> {
+  return authorizedEffectiveWorkspaceCwd(ctx);
+}
+
+function sessionCatalogIdentityForCwd(
+  ctx: CommandContext,
+  cwdRealpath: string,
+): SessionCatalogIdentity | undefined {
+  const identity = ctx.sessionCatalogIdentity;
+  return identity?.cwdRealpath === cwdRealpath ? identity : undefined;
 }
 
 function runtimeAccessStatus(
@@ -749,6 +873,18 @@ function runtimeAccessStatus(
         profileConfig.permissions.defaultAccess,
         profileConfig.permissions,
       ),
+    };
+  }
+  if (profileConfig.agentKind === 'kimi') {
+    const access = profileConfig.permissions.defaultAccess;
+    return {
+      label: 'access',
+      value:
+        access === 'full'
+          ? 'full：Shell/编辑已开启，Kimi yolo，Seatbelt 已关闭；附件、MCP、Skill 仍禁用'
+          : access === 'workspace'
+            ? 'workspace：Shell/编辑限当前工作区，Kimi yolo + Seatbelt；附件、MCP、Skill 仍禁用'
+            : 'read-only：macOS Seatbelt + ACP 受控文本读取，default 模式与拒绝审批；写入、进程执行、附件、MCP、Skill 均禁用',
     };
   }
   return {
@@ -790,19 +926,33 @@ async function larkCliStatus(ctx: CommandContext): Promise<'app' | 'user-ready' 
 }
 
 async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
-  const cwd = effectiveWorkspaceCwd(ctx);
+  const cwd = await authorizedEffectiveWorkspaceCwd(ctx);
   const sess = ctx.sessions.getRaw(ctx.scope);
   const isCodex = ctx.controls.profileConfig.agentKind === 'codex';
+  const isKimi = ctx.controls.profileConfig.agentKind === 'kimi';
+  const hideKimiGroupDetails = isKimi && ctx.chatMode !== 'p2p';
+  const identity = cwd ? sessionCatalogIdentityForCwd(ctx, cwd) : undefined;
   const catalogEntry =
-    isCodex && ctx.sessionCatalog && ctx.sessionCatalogIdentity
-      ? ctx.sessionCatalog.activeFor(ctx.sessionCatalogIdentity)
+    (isCodex || isKimi) && ctx.sessionCatalog && identity
+      ? ctx.sessionCatalog.activeFor(identity)
       : undefined;
+  const sessionId = isCodex
+    ? catalogEntry?.threadId
+    : isKimi && ctx.sessionCatalog
+      ? catalogEntry?.sessionId
+      : sess?.sessionId;
   const card = statusCard({
     profileName: ctx.controls.profile,
-    cwd,
-    sessionId: isCodex ? catalogEntry?.threadId : sess?.sessionId,
-    emptySessionText: isCodex ? '(未建立)' : undefined,
-    sessionStale: !isCodex && Boolean(cwd && sess && sess.cwd !== cwd),
+    cwd: hideKimiGroupDetails ? undefined : cwd,
+    emptyCwdText: hideKimiGroupDetails ? '(群聊已隐藏)' : undefined,
+    sessionId: hideKimiGroupDetails ? undefined : sessionId,
+    emptySessionText: hideKimiGroupDetails
+      ? '(群聊已隐藏)'
+      : isCodex
+        ? '(未建立)'
+        : undefined,
+    sessionStale:
+      !hideKimiGroupDetails && !isCodex && Boolean(cwd && sess && sess.cwd !== cwd),
     agentName: ctx.agent.displayName,
     runtimeAccess: runtimeAccessStatus(ctx.controls.profileConfig),
     larkCliStatus: await larkCliStatus(ctx),
@@ -933,6 +1083,126 @@ function parseTimeoutTarget(input: string, currentScope: string): {
   };
 }
 
+const MODEL_USAGE =
+  '\n\n用法:\n- `/model` 查看当前 session 的模型覆盖\n- `/model <id> [minimal|low|medium|high|xhigh|ultra]` 设置当前 session 使用的模型,如 `/model gpt-5.5 ultra` / `/model sonnet`\n- `/model default` 清除覆盖,回退到 agent 默认模型\n\n_注:切换模型会结束当前可恢复会话,下一条消息会启动新 session_';
+const KIMI_MODEL_USAGE =
+  '\n\n用法:\n- `/model` 查看当前 session 的模型覆盖\n- `/model <id>` 设置当前 Kimi session 使用的模型,如 `/model kimi-k2` / `/model kimi/k2`\n- `/model default` 清除覆盖,回退到 Kimi profile 默认模型\n\n_注:切换模型会结束当前可恢复会话,下一条消息会启动新 session_';
+async function handleModel(args: string, ctx: CommandContext): Promise<void> {
+  const isKimi = ctx.controls.profileConfig.agentKind === 'kimi';
+  const trimmed = args.trim();
+  const usage = isKimi ? KIMI_MODEL_USAGE : MODEL_USAGE;
+
+  if (!trimmed) {
+    const current = ctx.sessions.getModel(ctx.scope);
+    const effort = ctx.sessions.getReasoningEffort(ctx.scope);
+    await reply(
+      ctx,
+      current
+        ? `🧠 当前 session 模型覆盖:\`${current}\`${effort ? `,推理强度:\`${effort}\`` : ''}${usage}`
+        : `🧠 当前 session 未设置模型覆盖${effort ? `,推理强度:\`${effort}\`` : ''},使用 agent 默认模型。${usage}`,
+    );
+    return;
+  }
+
+  if (trimmed.toLowerCase() === 'default' || trimmed.toLowerCase() === 'clear') {
+    const cleared = ctx.sessions.clearModelOverride(ctx.scope);
+    const reasoningCleared = ctx.sessions.clearReasoningEffortOverride(ctx.scope);
+    resetCurrentSessionForModelChange(ctx);
+    log.info('command', 'model-clear', { scope: ctx.scope, cleared, reasoningCleared });
+    await reply(
+      ctx,
+      cleared || reasoningCleared
+        ? '✅ 已清除模型覆盖,回退到 agent 默认模型。下一条消息会启动新 session。'
+        : '当前 session 本来就没设置模型覆盖。',
+    );
+    return;
+  }
+
+  const parsed = parseModelArgs(trimmed, usage, { allowReasoningEffort: !isKimi });
+  if (!parsed.ok) {
+    await reply(ctx, parsed.message);
+    return;
+  }
+
+  const modelPattern = isKimi ? /^[\w.:-]+(?:\/[\w.:-]+)*$/ : /^[\w.:-]+$/;
+  if (!modelPattern.test(parsed.model)) {
+    await reply(ctx, `❌ 模型 id 里出现了不像模型标识的字符。${usage}`);
+    return;
+  }
+
+  ctx.sessions.setModel(ctx.scope, parsed.model);
+  if (parsed.reasoningEffort) {
+    ctx.sessions.setReasoningEffort(ctx.scope, parsed.reasoningEffort);
+  } else {
+    ctx.sessions.clearReasoningEffortOverride(ctx.scope);
+  }
+  resetCurrentSessionForModelChange(ctx);
+  log.info('command', 'model-set', {
+    scope: ctx.scope,
+    model: parsed.model,
+    reasoningEffort: parsed.reasoningEffort,
+  });
+  await reply(
+    ctx,
+    `✅ 之后本 session 的运行将使用模型 \`${parsed.model}\`${parsed.reasoningEffort ? `,推理强度 \`${parsed.reasoningEffort}\`` : ''}。下一条消息会启动新 session。`,
+  );
+}
+
+function parseModelArgs(
+  input: string,
+  usage = MODEL_USAGE,
+  options: { allowReasoningEffort?: boolean } = {},
+):
+  | { ok: true; model: string; reasoningEffort?: string }
+  | { ok: false; message: string } {
+  const parts = input.split(/\s+/).filter(Boolean);
+  if (parts.length === 0 || parts.length > 2) {
+    return { ok: false, message: `❌ 用法错误。${usage}` };
+  }
+  if (parts[1] && options.allowReasoningEffort === false) {
+    return { ok: false, message: `❌ Kimi Code 当前只支持切换模型 id，不支持推理强度参数。${usage}` };
+  }
+  const effort = parts[1] ? normalizeReasoningEffort(parts[1]) : undefined;
+  if (parts[1] && !effort) {
+    return { ok: false, message: `❌ 推理强度只支持 minimal / low / medium / high / xhigh / ultra。${usage}` };
+  }
+  return {
+    ok: true,
+    model: parts[0]!,
+    ...(effort ? { reasoningEffort: effort } : {}),
+  };
+}
+
+function normalizeReasoningEffort(input: string): string | undefined {
+  const normalized = input.toLowerCase();
+  if (normalized === 'minimal' || normalized === 'min') return 'minimal';
+  if (normalized === 'low' || normalized === '低') return 'low';
+  if (normalized === 'medium' || normalized === 'med' || normalized === '中') return 'medium';
+  if (
+    normalized === 'xhigh' ||
+    normalized === 'extra-high' ||
+    normalized === 'extra_high' ||
+    normalized === '超高'
+  ) return 'xhigh';
+  if (normalized === 'ultra' || normalized === 'max' || normalized === '最高') return 'ultra';
+  if (
+    normalized === 'high' ||
+    normalized === '高'
+  ) return 'high';
+  return undefined;
+}
+
+function resetCurrentSessionForModelChange(ctx: CommandContext): void {
+  ctx.activeRuns.interrupt(ctx.scope);
+  if (ctx.sessionCatalog && ctx.sessionCatalogIdentity) {
+    ctx.sessionCatalog.archiveActive({
+      ...ctx.sessionCatalogIdentity,
+      now: Date.now(),
+    });
+  }
+  ctx.sessions.clear(ctx.scope);
+}
+
 async function handlePs(_args: string, ctx: CommandContext): Promise<void> {
   const live = readAndPrune();
   log.info('command', 'ps', { count: live.length });
@@ -1054,6 +1324,9 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
     hasDescription: args.trim().length > 0,
     chatMode: ctx.chatMode,
   });
+  const isP2p = ctx.chatMode === 'p2p';
+  const hideKimiGroupWorkspace =
+    ctx.controls.profileConfig.agentKind === 'kimi' && !isP2p;
 
   const rateKey = `${ctx.controls.profile}:${ctx.controls.configPath}:${ctx.msg.senderId}`;
   const now = Date.now();
@@ -1076,23 +1349,36 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
 
-  const workspace = await resolveWorkingDirectory(requestedCwd);
+  const workspace = await resolveAuthorizedWorkingDirectory(
+    requestedCwd,
+    ctx.controls.profileConfig,
+  );
   if (!workspace.ok) {
     await reply(
       ctx,
       buildDoctorReport(ctx, {
-        workspaceCheck: `${workspace.userVisible} 工作目录不可用时只执行 self-check，不启动 agent。`,
+        workspaceDisplay:
+          workspace.reason === 'outside-profile-root'
+            ? '(未授权)'
+            : hideKimiGroupWorkspace
+              ? '(群聊已隐藏)'
+              : '(不可用)',
+        workspaceCheck: `${workspace.reason}: ${storedWorkspaceFailureMessage(ctx, workspace.userVisible)} 工作目录不可用或未授权时只执行 self-check，不启动 agent。`,
         echoCheck: 'skipped',
       }),
     );
     return;
   }
 
+  const workspaceCheck = hideKimiGroupWorkspace
+    ? 'ok (群聊已隐藏)'
+    : `ok (${workspace.cwdRealpath})`;
+
   if (!ctx.runExecutor) {
     await reply(
       ctx,
       buildDoctorReport(ctx, {
-        workspaceCheck: `ok (${workspace.cwdRealpath})`,
+        workspaceCheck,
         echoCheck: 'run executor unavailable',
       }),
     );
@@ -1106,10 +1392,7 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
   }
   doctorLastByOperator.set(rateKey, now);
 
-  const capability =
-    ctx.controls.profileConfig.agentKind === 'codex'
-      ? codexCapability(ctx.controls.profileConfig)
-      : claudeCapability(ctx.controls.profileConfig);
+  const capability = capabilityForProfile(ctx.controls.profileConfig);
   const policy = evaluateRunPolicy({
     scope: {
       source: 'im',
@@ -1131,7 +1414,7 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
     await reply(
       ctx,
       buildDoctorReport(ctx, {
-        workspaceCheck: `ok (${workspace.cwdRealpath})`,
+        workspaceCheck,
         echoCheck: policy.rejectReason.userVisible,
       }),
     );
@@ -1140,9 +1423,15 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
   const runtimeAccess = runtimeAccessStatus(ctx.controls.profileConfig);
   const doctorReport = (echoCheck: string): string =>
     buildDoctorReport(ctx, {
-      workspaceCheck: `ok (${workspace.cwdRealpath})`,
+      workspaceCheck,
       policyCheck:
-        runtimeAccess.label === 'sandbox'
+        ctx.controls.profileConfig.agentKind === 'kimi'
+          ? policy.accessMode === 'full'
+            ? 'ok seatbelt=off acp-fs=read-write mode=yolo'
+            : policy.accessMode === 'workspace'
+              ? 'ok seatbelt=workspace acp-fs=read-write mode=yolo'
+              : 'ok seatbelt=required acp-fs=read-only mode=default'
+          : runtimeAccess.label === 'sandbox'
           ? `ok sandbox=${policy.sandbox}`
           : `ok ${runtimeAccess.label}=${policy.permissionMode}`,
       echoCheck,
@@ -1151,7 +1440,6 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
   // In group / topic chats other members would see the result card. Ack
   // in-channel, deliver the actual analysis privately to the operator's
   // open_id (Lark auto-opens the p2p chat with the bot).
-  const isP2p = ctx.chatMode === 'p2p';
   if (!isP2p) {
     await reply(ctx, '🔍 已收到诊断请求，分析结果将私信发给你。');
   }
@@ -1177,7 +1465,13 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
       await reply(ctx, doctorReport('pool-full'));
       return;
     }
-    log.fail('command', err, { step: 'doctor.submit' });
+    if (ctx.controls.profileConfig.agentKind === 'kimi') {
+      // Kimi startup/provider failures may carry local config, paths, or
+      // credentials. The detailed Error must not enter durable bridge logs.
+      log.warn('command', 'kimi-doctor-submit-failed', { step: 'doctor.submit' });
+    } else {
+      log.fail('command', err, { step: 'doctor.submit' });
+    }
     reportMetric('command_fail', 1, { step: 'doctor.submit' });
     await reply(ctx, doctorReport('failed'));
     return;
@@ -1205,8 +1499,11 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
                 if (evt.type === 'usage') {
                   continue;
                 }
+                if (evt.type === 'progress') continue;
                 if (evt.type === 'text') echoText += evt.delta;
+                if (evt.type === 'final_text') echoText = evt.content;
                 state = reduce(state, evt);
+                if (evt.type === 'final_text') state = { ...state, blocks: [] };
                 await flush();
                 // Don't wait for stdout to close — some claude versions hang
                 // briefly post-result, which would leave the for-await stuck.
@@ -1231,8 +1528,11 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
         if (evt.type === 'usage') {
           continue;
         }
+        if (evt.type === 'progress') continue;
         if (evt.type === 'text') echoText += evt.delta;
+        if (evt.type === 'final_text') echoText = evt.content;
         state = reduce(state, evt);
+        if (evt.type === 'final_text') state = { ...state, blocks: [] };
         if (state.terminal !== 'running') break;
       }
       state = execution.handle.interrupted ? markInterrupted(state) : finalizeIfRunning(state);
@@ -1246,7 +1546,11 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
       });
     }
   } catch (err) {
-    log.fail('command', err, { step: 'doctor' });
+    if (ctx.controls.profileConfig.agentKind === 'kimi') {
+      log.warn('command', 'kimi-doctor-failed', { step: 'doctor' });
+    } else {
+      log.fail('command', err, { step: 'doctor' });
+    }
     reportMetric('command_fail', 1, { step: 'doctor' });
   } finally {
     doctorInFlightProfiles.delete(profileKey);
@@ -1256,6 +1560,7 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
 function buildDoctorReport(
   ctx: CommandContext,
   opts: {
+    workspaceDisplay?: string;
     workspaceCheck?: string;
     policyCheck?: string;
     echoCheck?: string;
@@ -1265,7 +1570,11 @@ function buildDoctorReport(
   const queueLine = queue
     ? `${queue.active}/${queue.cap} active, ${queue.waiting} waiting`
     : 'unknown';
-  const cwd = effectiveWorkspaceCwd(ctx);
+  const hideKimiGroupWorkspace =
+    ctx.controls.profileConfig.agentKind === 'kimi' && ctx.chatMode !== 'p2p';
+  const cwd =
+    opts.workspaceDisplay ??
+    (hideKimiGroupWorkspace ? '(群聊已隐藏)' : effectiveWorkspaceCwd(ctx));
   const runtimeAccess = runtimeAccessStatus(ctx.controls.profileConfig);
   const access =
     ctx.msg.chatType === 'p2p'
@@ -1480,6 +1789,13 @@ async function handleInvite(args: string, ctx: CommandContext): Promise<void> {
   const tokens = args.trim().split(/\s+/).filter(Boolean).map((token) => token.toLowerCase());
 
   if (tokens.includes('all') && tokens.includes('group')) {
+    if (ctx.controls.profileConfig.agentKind === 'kimi') {
+      await reply(
+        ctx,
+        '❌ Kimi profile 禁止批量开放群聊。请仅在已确认无外部成员的指定话题群中使用 `/invite group`。',
+      );
+      return;
+    }
     const list = new Set(ctx.controls.profileConfig.access.allowedChats);
     let knownChats = ctx.controls.knownChats ?? [];
     if (knownChats.length === 0) {

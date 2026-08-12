@@ -7,6 +7,7 @@ import {
   AgentPreflightError,
   checkAgentVersion,
   formatAgentPreflightError,
+  getAgentPreflightDiagnostic,
 } from '../../../src/agent/preflight.js';
 
 describe('agent preflight diagnostics', () => {
@@ -128,6 +129,7 @@ describe('agent preflight diagnostics', () => {
       ['agent-version-check-timeout', '✗ 本地 Codex CLI 不可用：`codex --version` 超时未返回。'],
       ['agent-version-check-nonzero-exit', '✗ 本地 Codex CLI 不可用：`codex --version` 退出码为 42。'],
       ['agent-version-check-empty-output', '✗ 本地 Codex CLI 不可用：`codex --version` 没有返回版本信息。'],
+      ['agent-version-check-unsupported-version', '✗ 本地 Codex CLI 版本不在当前安全试点允许范围内。'],
     ] as const;
 
     for (const [code, firstLine] of cases) {
@@ -147,6 +149,42 @@ describe('agent preflight diagnostics', () => {
       expect(message).toContain(`错误码：${code}`);
       expect(message).not.toContain('/opt/homebrew');
     }
+  });
+
+  it('shows administrators the allowed and actual Kimi versions', () => {
+    const message = formatAgentPreflightError(
+      new AgentPreflightError({
+        code: 'agent-version-check-unsupported-version',
+        agentId: 'kimi',
+        agentName: 'Kimi Code CLI',
+        command: 'kimi',
+        binaryPath: '/private/path/kimi',
+        args: ['--version'],
+        expected: '0.29.2',
+        actual: '0.30.0',
+      }),
+    );
+
+    expect(message).toContain('当前版本：0.30.0');
+    expect(message).toContain('允许版本：0.29.2');
+    expect(message).not.toContain('/private/path');
+  });
+
+  it('recognizes nested Kimi preflight diagnostics', () => {
+    expect(getAgentPreflightDiagnostic({
+      cause: new AgentPreflightError({
+        code: 'agent-binary-not-found',
+        agentId: 'kimi',
+        agentName: 'Kimi Code CLI',
+        command: 'kimi',
+        binaryPath: '/opt/kimi/bin/kimi',
+      }),
+    })).toMatchObject({
+      code: 'agent-binary-not-found',
+      agentId: 'kimi',
+      agentName: 'Kimi Code CLI',
+      command: 'kimi',
+    });
   });
 });
 

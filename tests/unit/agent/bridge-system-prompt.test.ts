@@ -33,6 +33,11 @@ describe('bridge system prompt bot collaboration rules', () => {
     expect(BRIDGE_SYSTEM_PROMPT).toContain('mentions');
   });
 
+  it('documents the default local image output directory', () => {
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('LARK_CHANNEL_IMAGE_DIR');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('默认图片输出目录');
+  });
+
   it('tells the agent not to mimic the batch sender annotation format', () => {
     expect(BRIDGE_SYSTEM_PROMPT).toContain('[名字 (user|bot)]');
     expect(BRIDGE_SYSTEM_PROMPT).toContain('不要模仿');

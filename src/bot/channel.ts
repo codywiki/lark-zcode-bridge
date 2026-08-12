@@ -3,9 +3,9 @@ import type {
   LarkChannelOptions,
   NormalizedMessage,
 } from '@larksuite/channel';
-import { createLarkChannel } from '@larksuite/channel';
+import { createLarkChannel, LarkChannelError } from '@larksuite/channel';
 import { dirname, join } from 'node:path';
-import { claudeCapability, codexCapability } from '../agent/capability';
+import { capabilityForProfile } from '../agent/capability';
 import {
   buildAgentPrompt,
   type BridgePromptInteractiveCard,
@@ -16,6 +16,7 @@ import type { AgentAdapter, AgentEvent } from '../agent/types';
 import { handleCardAction } from '../card/dispatcher';
 import { CallbackAuth } from '../card/callback-auth';
 import { CallbackNonceStore } from '../card/callback-store';
+import { renderCompletionSummary } from '../card/completion-summary';
 import { renderCard } from '../card/run-renderer';
 import {
   finalizeIfRunning,
@@ -38,7 +39,7 @@ import {
 } from '../config/schema';
 import { resolveAppSecret } from '../config/secret-resolver';
 import { log, reportMetric, withTrace } from '../core/logger';
-import { MediaCache, type LocalAttachment } from '../media/cache';
+import { MediaCache, type LocalAttachment, type ResourceRequest } from '../media/cache';
 import {
   toPolicyAttachment,
   toPromptAttachment,
@@ -58,6 +59,7 @@ import { commandSessionCatalogIdentity } from './session-catalog-identity';
 import { startKeepalive } from './keepalive';
 import { PendingQueue } from './pending-queue';
 import { ProcessPool } from './process-pool';
+import { collectForwardedResources } from './forwarded-resources';
 import { fetchQuotedContext, type QuotedContext } from './quote';
 import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
@@ -65,7 +67,16 @@ import type { AppPaths } from '../config/app-paths';
 
 const DEBOUNCE_MS = 600;
 const STREAM_TERMINAL_GRACE_MS = 3000;
+const PROGRESS_UPDATE_TIMEOUT_MS = 3000;
+const CODEX_LIVE_STATUS = { initialDelayMs: 2_000, intervalMs: 60_000 } as const;
+const FINAL_CARD_ELEMENT_MAX_SERIALIZED_BYTES = 20_000;
+const FINAL_CARD_MAX_SERIALIZED_BYTES = 28_000;
+const FINAL_CARD_MAX_ELEMENTS = 10;
+const FINAL_MARKDOWN_MESSAGE_MAX_SERIALIZED_BYTES = 3_200;
+const EMPTY_RESULT_MARKDOWN = '_（未返回内容）_';
 const REACTION_CLEANUP_GRACE_MS = 1000;
+const KIMI_ATTACHMENT_REJECT_MESSAGE =
+  '❌ Kimi 试点暂不支持附件；本批消息未运行，附件也未下载。请移除附件后重发纯文本。';
 
 const BRIDGE_AGENT_INSTRUCTIONS = [
   '你在 bridge 进程中运行，普通 lark-cli 会继承 LARK_CHANNEL=1 并进入 bridge-bound 模式。',
@@ -166,7 +177,7 @@ export interface StartChannelDeps {
   sessionCatalog?: SessionCatalog;
   workspaces: WorkspaceStore;
   controls: Controls;
-  appPaths?: Pick<AppPaths, 'secretsFile' | 'keystoreSaltFile' | 'mediaDir'>;
+  appPaths?: Pick<AppPaths, 'secretsFile' | 'keystoreSaltFile' | 'mediaDir' | 'profileDir'>;
 }
 
 export async function startChannel(deps: StartChannelDeps): Promise<BridgeChannel> {
@@ -178,7 +189,12 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   // Concurrency cap — reads `preferences.maxConcurrentRuns` on each acquire,
   // so /config bumps take effect for the next run.
   const pool = new ProcessPool(() => getMaxConcurrentRuns(controls.cfg));
-  const executor = new RunExecutor({ agent, pool, activeRuns });
+  const executor = new RunExecutor({
+    agent,
+    pool,
+    activeRuns,
+    ...(deps.appPaths?.profileDir ? { profileStateDir: deps.appPaths.profileDir } : {}),
+  });
 
   // Resolve the App Secret to plaintext. The config field can be a literal
   // string, a "${VAR}" template, or a {source, id} SecretRef referencing
@@ -558,6 +574,27 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
 
+  // Refuse Kimi resources at intake as well as at the batch boundary below.
+  // This covers slash-command messages carrying an attachment (which never
+  // enter runAgentBatch) and drops any text already coalesced into that batch.
+  if (controls.profileConfig.agentKind === 'kimi' && msg.resources.length > 0) {
+    const dropped = pending.cancel(scope);
+    log.info('media', 'kimi-intake-rejected-before-download', {
+      scope,
+      resourceCount: msg.resources.length,
+      droppedPending: dropped.length,
+    });
+    await channel.send(
+      msg.chatId,
+      { markdown: KIMI_ATTACHMENT_REJECT_MESSAGE },
+      {
+        replyTo: msg.messageId,
+        ...(chatMode === 'topic' && msg.threadId ? { replyInThread: true } : {}),
+      },
+    );
+    return;
+  }
+
   const handled = await tryHandleCommand({
     channel,
     msg,
@@ -581,8 +618,10 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     controls,
   });
   if (handled) {
-    const dropped = pending.cancel(scope);
-    log.info('intake', 'command', { scope, droppedPending: dropped.length });
+    // Commands bypass the queue, but must not silently erase ordinary
+    // messages already waiting behind an active run. Context-changing
+    // commands apply before that preserved batch starts.
+    log.info('intake', 'command', { scope, pending: 'preserved' });
     return;
   }
 
@@ -590,7 +629,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
 }
 
-interface RunBatchDeps {
+export interface RunBatchDeps {
   channel: LarkChannel;
   executor: RunExecutor;
   sessions: SessionStore;
@@ -605,7 +644,8 @@ interface RunBatchDeps {
   mode: ChatMode;
 }
 
-async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
+/** @internal Exported for integration tests; production calls this through the pending queue. */
+export async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const {
     channel,
     executor,
@@ -628,21 +668,35 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const chatId = firstMsg.chatId;
   const threadId = firstMsg.threadId;
 
-  const resourceItems = batch.flatMap((m) =>
+  // For topic groups: thread the reply so it lands in the same topic as the
+  // user's message. Otherwise the SDK posts at top level and the user's
+  // topic discussion breaks visually.
+  const sendOpts = {
+    replyTo: lastMsg.messageId,
+    ...(mode === 'topic' && threadId ? { replyInThread: true } : {}),
+  };
+
+  const resourceItems: ResourceRequest[] = batch.flatMap((m) =>
     m.resources.map((r) => ({ messageId: m.messageId, resource: r })),
   );
-  const attachments = await media.resolve(resourceItems, controls.profileConfig.attachments);
-  if (attachments.length > 0) {
-    log.info('media', 'resolved', { count: attachments.length });
-    for (const attachment of attachments) {
-      log.info('attachment', 'decision', {
-        decision: attachment.decision,
-        kind: attachment.kind,
-        hash: attachment.hash,
-        size: attachment.size,
-        sourceMessageId: attachment.sourceMessageId,
-        reason: attachment.rejectionReason,
+
+  // merge_forward fix: the SDK's normalize expands forwarded trees into the
+  // `<forwarded_messages>` text block but returns `resources: []` for the
+  // parent, so files inside a merged forward used to reach the agent as a
+  // bare `<file key="…"/>` reference with no bytes behind it (and silently
+  // bypassed the Kimi text-only gate below). Re-fetch the tree and pair each
+  // resource with the owning sub-message id so MediaCache can download it.
+  for (const m of batch) {
+    if (m.rawContentType !== 'merge_forward') continue;
+    const forwarded = await collectForwardedResources(channel, m.messageId, {
+      maxResources: controls.profileConfig.attachments?.maxCount,
+    });
+    if (forwarded.length > 0) {
+      log.info('media', 'forwarded-resources', {
+        messageId: m.messageId,
+        count: forwarded.length,
       });
+      resourceItems.push(...forwarded);
     }
   }
 
@@ -662,24 +716,53 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     const q = await fetchQuotedContext(channel, targetId);
     if (q) {
       quotes.push(q);
+      // A quoted file message (or a quoted merge_forward's sub-messages)
+      // carries downloadable resources — route them through the same
+      // pipeline so the quoted content's bytes reach the agent too.
+      resourceItems.push(...q.resources);
       log.info('quote', 'fetched', {
         messageId: targetId,
         type: q.rawContentType,
         contentChars: q.content.length,
+        resources: q.resources.length,
+      });
+    }
+  }
+
+  // Kimi's organization-wide pilot is text-only. Reject the entire debounced
+  // batch before MediaCache.resolve() can download even one byte; otherwise
+  // an attachment could reach local disk despite the run itself being denied.
+  if (controls.profileConfig.agentKind === 'kimi' && resourceItems.length > 0) {
+    log.info('media', 'kimi-batch-rejected-before-download', {
+      scope,
+      resourceCount: resourceItems.length,
+    });
+    await channel.send(
+      chatId,
+      {
+        markdown: KIMI_ATTACHMENT_REJECT_MESSAGE,
+      },
+      sendOpts,
+    );
+    return;
+  }
+  const attachments = await media.resolve(resourceItems, controls.profileConfig.attachments);
+  if (attachments.length > 0) {
+    log.info('media', 'resolved', { count: attachments.length });
+    for (const attachment of attachments) {
+      log.info('attachment', 'decision', {
+        decision: attachment.decision,
+        kind: attachment.kind,
+        hash: attachment.hash,
+        size: attachment.size,
+        sourceMessageId: attachment.sourceMessageId,
+        reason: attachment.rejectionReason,
       });
     }
   }
 
   const prompt = buildPrompt(batch, attachments, quotes, channel.botIdentity);
   log.info('prompt', 'built', { promptChars: prompt.length, quotes: quotes.length });
-
-  // For topic groups: thread the reply so it lands in the same topic as the
-  // user's message. Otherwise the SDK posts at top level and the user's
-  // topic discussion breaks visually.
-  const sendOpts = {
-    replyTo: lastMsg.messageId,
-    ...(mode === 'topic' && threadId ? { replyInThread: true } : {}),
-  };
 
   const accessDecision =
     firstMsg.chatType === 'p2p'
@@ -691,10 +774,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     actorId: firstMsg.senderId,
     ...(threadId ? { threadId } : {}),
   };
-  const capability =
-    controls.profileConfig.agentKind === 'codex'
-      ? codexCapability(controls.profileConfig)
-      : claudeCapability(controls.profileConfig);
+  const capability = capabilityForProfile(controls.profileConfig);
   const flow = await startRunFlow({
     scopeId: scope,
     scope: scopeContext,
@@ -732,9 +812,17 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const handle = execution.handle;
   const eventStream = execution.subscribe();
   if (flow.resumeFrom) {
-    log.info('session', 'resume', { sessionId: flow.resumeFrom, cwd });
+    if (capability.agentId === 'kimi') {
+      log.info('session', 'resume', { agent: 'kimi', hasSession: true });
+    } else {
+      log.info('session', 'resume', { sessionId: flow.resumeFrom, cwd });
+    }
   } else {
-    log.info('session', 'fresh', { cwd });
+    if (capability.agentId === 'kimi') {
+      log.info('session', 'fresh', { agent: 'kimi' });
+    } else {
+      log.info('session', 'fresh', { cwd });
+    }
   }
   const recordSession = (evt: AgentEvent): void => {
     recordRunSessionEvent({
@@ -746,10 +834,18 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       event: evt,
     });
     if (evt.type === 'system' && evt.sessionId) {
-      log.info('session', 'set', { sessionId: evt.sessionId });
+      if (capability.agentId === 'kimi') {
+        log.info('session', 'set', { agent: 'kimi', hasSession: true });
+      } else {
+        log.info('session', 'set', { sessionId: evt.sessionId });
+      }
     }
     if (evt.type === 'system' && evt.threadId) {
-      log.info('session', 'set-thread', { threadId: evt.threadId });
+      if (capability.agentId === 'kimi') {
+        log.info('session', 'set-thread', { agent: 'kimi', hasThread: true });
+      } else {
+        log.info('session', 'set-thread', { threadId: evt.threadId });
+      }
     }
   };
 
@@ -789,6 +885,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           }),
       }
     : {};
+  const progressCardRenderOptions =
+    capability.agentId === 'codex'
+      ? { ...cardRenderOptions, compactProcess: true }
+      : cardRenderOptions;
+  const agentStreamOptions =
+    capability.agentId === 'codex' ? { liveStatus: CODEX_LIVE_STATUS } : undefined;
 
   // For non-card modes Claude's output doesn't surface visually until either
   // a first streamed token (markdown mode) or the whole run ends (text mode).
@@ -801,9 +903,49 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     if (replyMode === 'card') {
       let latestState: RunState = initialState;
       let producerStarted = false;
+      let progressDeliveryFailed = false;
+      let fallbackSent = false;
+      let progressMessageId: string | undefined;
       let cardCtrl:
         | { update(next: object | ((current: object) => object)): Promise<void> }
         | undefined;
+      const progress = createLazyProgressStream(scope, replyMode, () =>
+        channel.stream(
+          chatId,
+          {
+            card: {
+              initial: renderCard(initialState, progressCardRenderOptions),
+              producer: async (ctrl) => {
+                producerStarted = true;
+                progressMessageId = ctrl.messageId;
+                if (progress.abandoned()) {
+                  await recallStreamedMessage(channel, ctrl, scope);
+                  return;
+                }
+                cardCtrl = ctrl;
+                const updated = await boundedProgressUpdate(
+                  () =>
+                    ctrl.update(
+                      renderCard(
+                        progressDisplayState(filterForPrefs(latestState)),
+                        progressCardRenderOptions,
+                      ),
+                    ),
+                  replyMode,
+                );
+                if (!updated) {
+                  progressDeliveryFailed = true;
+                  progress.abandon();
+                  cardCtrl = undefined;
+                  return;
+                }
+                await renderDone;
+              },
+            },
+          },
+          sendOpts,
+        ),
+      );
       const renderDone = processAgentStream(
         handle,
         eventStream,
@@ -812,43 +954,122 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         recordSession,
         async (state) => {
           latestState = state;
-          if (cardCtrl) {
-            await cardCtrl.update(renderCard(filterForPrefs(state), cardRenderOptions));
+          const visibleState = filterForPrefs(state);
+          const openedProgress =
+            shouldOpenProgressStream(visibleState) && progress.ensureOpen();
+          if (cardCtrl && !openedProgress) {
+            const ctrl = cardCtrl;
+            const updated = await boundedProgressUpdate(
+              () =>
+                ctrl.update(
+                  renderCard(progressDisplayState(visibleState), progressCardRenderOptions),
+                ),
+              replyMode,
+            );
+            if (!updated) {
+              progressDeliveryFailed = true;
+              progress.abandon();
+              cardCtrl = undefined;
+            }
           }
         },
+        agentStreamOptions,
       );
-      const streamDone = channel.stream(
-        chatId,
-        {
-          card: {
-            initial: renderCard(initialState, cardRenderOptions),
-            producer: async (ctrl) => {
-              producerStarted = true;
-              cardCtrl = ctrl;
-              await ctrl.update(renderCard(filterForPrefs(latestState), cardRenderOptions));
-              await renderDone;
-            },
-          },
-        },
-        sendOpts,
+      if (capability.agentId !== 'codex') progress.ensureOpen();
+      const sendProgressFallback = async (state: RunState): Promise<void> => {
+        const visibleState = progressDisplayState(filterForPrefs(state));
+        if (!hasVisibleProgress(visibleState, replyMode)) return;
+        await channel.send(
+          chatId,
+          { card: renderCard(visibleState, progressCardRenderOptions) },
+          sendOpts,
+        );
+        fallbackSent = true;
+      };
+      try {
+        await awaitRenderAwareStream({
+          mode: replyMode,
+          progress,
+          renderDone,
+          producerStarted: () => producerStarted,
+          fallback: sendProgressFallback,
+        });
+      } catch (err) {
+        if (capability.agentId !== 'codex') throw err;
+        log.fail('stream', err, { mode: replyMode, step: 'progress-stream' });
+      }
+      recallIfEmptyStreamedReply(
+        channel,
+        progress,
+        progressDisplayState(filterForPrefs(latestState)),
+        scope,
+        replyMode,
+        progressMessageId,
       );
-      await awaitRenderAwareStream({
-        mode: replyMode,
-        streamDone,
-        renderDone,
-        producerStarted: () => producerStarted,
-        fallback: async (state) => {
-          await channel.send(
-            chatId,
-            { card: renderCard(filterForPrefs(state), cardRenderOptions) },
-            sendOpts,
-          );
-        },
-      });
+      const finalState = await renderDone;
+      if (progressDeliveryFailed && !fallbackSent) {
+        await runFallbackReply(replyMode, finalState, sendProgressFallback);
+      }
+      const visibleFinalState = filterForPrefs(finalState);
+      if (visibleFinalState.terminal !== 'done') {
+        await sendTerminalNotice(
+          channel,
+          chatId,
+          visibleFinalState,
+          replyMode,
+          sendOpts,
+          cardRenderOptions,
+        );
+      } else if (capability.agentId === 'codex') {
+        await sendCodexFinalReply(
+          channel,
+          chatId,
+          visibleFinalState,
+          replyMode,
+          sendOpts,
+          cardRenderOptions,
+        );
+      } else {
+        await sendCompletionSummary(channel, chatId, finalState, sendOpts);
+      }
     } else if (replyMode === 'markdown') {
       let latestState: RunState = initialState;
       let producerStarted = false;
+      let progressDeliveryFailed = false;
+      let fallbackSent = false;
+      let progressMessageId: string | undefined;
       let markdownCtrl: { setContent(markdown: string): Promise<void> } | undefined;
+      const progress = createLazyProgressStream(scope, replyMode, () =>
+        channel.stream(
+          chatId,
+          {
+            markdown: async (ctrl) => {
+              producerStarted = true;
+              progressMessageId = ctrl.messageId;
+              if (progress.abandoned()) {
+                if (capability.agentId !== 'codex') {
+                  await recallStreamedMessage(channel, ctrl, scope);
+                }
+                return;
+              }
+              markdownCtrl = ctrl;
+              const updated = await boundedProgressUpdate(
+                () =>
+                  ctrl.setContent(renderText(progressDisplayState(filterForPrefs(latestState)))),
+                replyMode,
+              );
+              if (!updated) {
+                progressDeliveryFailed = true;
+                progress.abandon();
+                markdownCtrl = undefined;
+                return;
+              }
+              await renderDone;
+            },
+          },
+          sendOpts,
+        ),
+      );
       const renderDone = processAgentStream(
         handle,
         eventStream,
@@ -857,35 +1078,78 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         recordSession,
         async (state) => {
           latestState = state;
-          if (markdownCtrl) {
-            await markdownCtrl.setContent(renderText(filterForPrefs(state)));
+          const visibleState = filterForPrefs(state);
+          const openedProgress =
+            shouldOpenProgressStream(visibleState) && progress.ensureOpen();
+          if (markdownCtrl && !openedProgress) {
+            const ctrl = markdownCtrl;
+            const updated = await boundedProgressUpdate(
+              () => ctrl.setContent(renderText(progressDisplayState(visibleState))),
+              replyMode,
+            );
+            if (!updated) {
+              progressDeliveryFailed = true;
+              progress.abandon();
+              markdownCtrl = undefined;
+            }
           }
         },
+        agentStreamOptions,
       );
-      const streamDone = channel.stream(
-        chatId,
-        {
-          markdown: async (ctrl) => {
-            producerStarted = true;
-            markdownCtrl = ctrl;
-            await ctrl.setContent(renderText(filterForPrefs(latestState)));
-            await renderDone;
-          },
-        },
-        sendOpts,
-      );
+      if (capability.agentId !== 'codex') progress.ensureOpen();
+      const sendProgressFallback = async (state: RunState): Promise<void> => {
+        const visibleState = progressDisplayState(filterForPrefs(state));
+        const body = renderText(visibleState);
+        if (!hasVisibleProgress(visibleState, replyMode)) return;
+        await channel.send(chatId, { markdown: body }, sendOpts);
+        fallbackSent = true;
+      };
       await awaitRenderAwareStream({
         mode: replyMode,
-        streamDone,
+        progress,
         renderDone,
         producerStarted: () => producerStarted,
-        fallback: async (state) => {
-          const body = renderText(filterForPrefs(state));
-          if (body.trim()) {
-            await channel.send(chatId, { markdown: body }, sendOpts);
-          }
-        },
+        fallback: sendProgressFallback,
       });
+      if (capability.agentId !== 'codex') {
+        recallIfEmptyStreamedReply(
+          channel,
+          progress,
+          progressDisplayState(filterForPrefs(latestState)),
+          scope,
+          replyMode,
+          progressMessageId,
+        );
+      }
+      const finalState = await renderDone;
+      if (progressDeliveryFailed && !fallbackSent) {
+        await runFallbackReply(replyMode, finalState, sendProgressFallback);
+      }
+      const visibleFinalState = filterForPrefs(finalState);
+      if (visibleFinalState.terminal !== 'done') {
+        await sendTerminalNotice(
+          channel,
+          chatId,
+          visibleFinalState,
+          replyMode,
+          sendOpts,
+          cardRenderOptions,
+        );
+      } else if (capability.agentId === 'codex') {
+        await sendCodexFinalReply(
+          channel,
+          chatId,
+          visibleFinalState,
+          replyMode,
+          sendOpts,
+          cardRenderOptions,
+        );
+      } else {
+        await sendCompletionSummary(channel, chatId, finalState, sendOpts);
+      }
+      if (capability.agentId === 'codex') {
+        recallStreamedReply(channel, progress, scope, progressMessageId);
+      }
     } else {
       // text mode: drain the agent stream without sending anything during
       // the run, then post the final rendered text once as a plain markdown
@@ -898,9 +1162,21 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         recordSession,
         async () => {},
       );
-      const body = renderText(filterForPrefs(finalState));
-      if (body.trim()) {
-        await channel.send(chatId, { markdown: body }, sendOpts);
+      const visibleState = filterForPrefs(finalState);
+      if (capability.agentId === 'codex' && visibleState.terminal === 'done') {
+        await sendCodexFinalReply(
+          channel,
+          chatId,
+          visibleState,
+          replyMode,
+          sendOpts,
+          cardRenderOptions,
+        );
+      } else {
+        const body = renderText(visibleState);
+        if (body.trim()) {
+          await channel.send(chatId, { markdown: body }, sendOpts);
+        }
       }
     }
   } catch (err) {
@@ -916,68 +1192,92 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
  * on every state transition. Used by both card and markdown reply modes —
  * the only difference between the two is what `flush` does with the state.
  */
-async function processAgentStream(
+/** @internal Exported for deterministic lifecycle/watchdog tests. */
+export async function processAgentStream(
   handle: RunHandle,
   events: AsyncIterable<AgentEvent>,
   scope: string,
   idleTimeoutMs: number | undefined,
   recordSession: (event: AgentEvent) => void,
   flush: (state: RunState) => Promise<void>,
+  options: {
+    liveStatus?: { initialDelayMs: number; intervalMs: number };
+  } = {},
 ): Promise<RunState> {
   const runStart = Date.now();
   let state: RunState = initialState;
+  let lastFlushedState: RunState | undefined;
+  let lastAgentActivityAt = runStart;
+  const liveStatus = options.liveStatus;
+  let nextLiveStatusAt = liveStatus ? runStart + liveStatus.initialDelayMs : undefined;
+  let sentInitialLiveStatus = false;
 
-  // Idle watchdog: claude going silent for `idleTimeoutMs` is treated as
-  // "presumed hung", we stop() and surface a timeout marker on the card.
-  //
-  // BUT — claude can legitimately be silent for a long time when it's
-  // waiting on a long-running tool call (e.g. `lark-cli` printing an
-  // OAuth URL and blocking until the user clicks authorize). In that
-  // case there's no event stream activity from claude itself, only the
-  // tool subprocess running. We track which tool_use ids haven't matched
-  // a tool_result yet, and pause the watchdog whenever the set is
-  // non-empty.
-  //
-  // The watchdog re-arms when:
-  //  - a tool_result drains the in-flight set to zero, OR
-  //  - any non-tool event arrives while the set is empty.
+  // Idle watchdog: any agent stream that emits no event for the configured
+  // window is presumed hung. Tool calls are deliberately included: an
+  // unmatched tool_use used to disable this timer forever, which is one of
+  // the dead-run paths this watchdog exists to recover from. The 20-minute
+  // default leaves headroom above the known 10-minute OAuth device flow;
+  // `/timeout off` remains available for exceptional long-silence sessions.
   let idleFired = false;
   let timer: NodeJS.Timeout | undefined;
-  const inFlightTools = new Set<string>();
-  const armOrPauseIdle = (): void => {
+  const armIdle = (): void => {
     if (!idleTimeoutMs) return;
     if (timer) clearTimeout(timer);
-    timer = undefined;
-    if (inFlightTools.size > 0) return;
     timer = setTimeout(() => {
       idleFired = true;
-      handle.interrupted = true;
       log.warn('agent', 'idle-timeout', { scope, idleTimeoutMs });
-      void handle.run.stop().catch(() => {
+      void handle.requestStop('timeout').catch(() => {
         /* stop errors are non-fatal */
       });
     }, idleTimeoutMs);
   };
-  armOrPauseIdle();
+  armIdle();
 
+  const iterator = events[Symbol.asyncIterator]();
+  let pendingNext: Promise<IteratorResult<AgentEvent>> | undefined;
   try {
-    for await (const evt of events) {
-      if (handle.interrupted) break;
-
-      // Track tool flight before re-arming the idle timer so the arm step
-      // sees the correct set size. tool_use opens a window; tool_result
-      // closes it. Other event types are bookkept after the if/else.
-      if (evt.type === 'tool_use') {
-        inFlightTools.add(evt.id);
-        log.info('agent', 'tool-in-flight', {
-          tool: evt.name,
-          inFlight: inFlightTools.size,
-        });
-      } else if (evt.type === 'tool_result') {
-        inFlightTools.delete(evt.id);
-        log.info('agent', 'tool-done', { inFlight: inFlightTools.size });
+    while (true) {
+      pendingNext ??= iterator.next();
+      let next: IteratorResult<AgentEvent>;
+      if (liveStatus && nextLiveStatusAt !== undefined) {
+        const delayMs = nextLiveStatusAt - Date.now();
+        const outcome =
+          delayMs <= 0
+            ? ({ kind: 'live-status' } as const)
+            : await nextEventOrLiveStatus(pendingNext, delayMs);
+        if (outcome.kind === 'live-status') {
+          const now = Date.now();
+          state = withLiveStatus(state, runStart, lastAgentActivityAt, now);
+          log.info('card', 'live-status', {
+            elapsedSeconds: state.liveStatus?.elapsedSeconds,
+            idleSeconds: state.liveStatus?.idleSeconds,
+          });
+          await flush(state);
+          lastFlushedState = state;
+          if (!sentInitialLiveStatus) {
+            sentInitialLiveStatus = true;
+            nextLiveStatusAt = runStart + liveStatus.intervalMs;
+          } else {
+            nextLiveStatusAt += liveStatus.intervalMs;
+          }
+          while (nextLiveStatusAt <= now) nextLiveStatusAt += liveStatus.intervalMs;
+          continue;
+        }
+        next = outcome.next;
+      } else {
+        next = await pendingNext;
       }
-      armOrPauseIdle();
+      pendingNext = undefined;
+      if (next.done) break;
+      const evt = next.value;
+      lastAgentActivityAt = Date.now();
+
+      if (isTerminalAgentEvent(evt)) {
+        if (timer) clearTimeout(timer);
+        timer = undefined;
+      } else {
+        armIdle();
+      }
 
       if (evt.type === 'system') {
         recordSession(evt);
@@ -997,14 +1297,22 @@ async function processAgentStream(
         }
         continue;
       }
+      if (evt.type === 'progress') continue;
 
       const prevTerminal = state.terminal;
       const prevFooter = state.footer;
       state = reduce(state, evt);
+      if (state.terminal === 'idle_timeout' && idleTimeoutMs) {
+        state = markIdleTimeout(state, Math.round(idleTimeoutMs / 60_000));
+      }
+      if (state.liveStatus) {
+        state = withLiveStatus(state, runStart, lastAgentActivityAt, Date.now());
+      }
       if (state.footer !== prevFooter || state.terminal !== prevTerminal) {
         log.info('card', 'transition', { footer: state.footer, terminal: state.terminal });
       }
       await flush(state);
+      lastFlushedState = state;
       // Stop iterating as soon as we have a terminal state. Some claude
       // versions don't close stdout immediately after the result event, which
       // would leave the for-await waiting forever otherwise.
@@ -1012,13 +1320,33 @@ async function processAgentStream(
     }
   } finally {
     if (timer) clearTimeout(timer);
+    const closing = iterator.return?.();
+    if (pendingNext) {
+      // Async generators queue return() behind an in-flight next(). A status
+      // delivery failure must surface immediately even when the agent has not
+      // emitted anything yet, so request cleanup without awaiting that queue.
+      void closing?.catch((err) => {
+        log.warn('agent', 'iterator-close-failed', {
+          scope,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      });
+    } else {
+      await closing;
+    }
   }
 
   // If state already reached a terminal event (done/error/etc.) before the
   // watchdog or interrupt could land, don't clobber it — that real terminal
   // wins. This avoids "claude finished but flush was slow → timer fired
   // mid-flush → user sees 'idle_timeout' on a successful run".
-  if (state.terminal === 'running') {
+  if (
+    idleFired &&
+    state.terminal === 'idle_timeout' &&
+    state.idleTimeoutMinutes === undefined
+  ) {
+    state = markIdleTimeout(state, Math.round(idleTimeoutMs! / 60_000));
+  } else if (state.terminal === 'running') {
     if (idleFired) {
       state = markIdleTimeout(state, Math.round(idleTimeoutMs! / 60_000));
     } else if (handle.interrupted) {
@@ -1029,21 +1357,158 @@ async function processAgentStream(
   }
   log.info('card', 'final', { terminal: state.terminal, interrupted: handle.interrupted });
   reportMetric('run_e2e_ms', Date.now() - runStart, { terminal: state.terminal });
-  await flush(state);
+  if (state !== lastFlushedState) {
+    await flush(state);
+  }
   if (handle.interrupted) {
-    await handle.run.stop();
+    await handle.requestStop(idleFired ? 'timeout' : 'interrupted');
   }
   return state;
 }
 
+async function nextEventOrLiveStatus(
+  pendingNext: Promise<IteratorResult<AgentEvent>>,
+  delayMs: number,
+): Promise<
+  | { kind: 'event'; next: IteratorResult<AgentEvent> }
+  | { kind: 'live-status' }
+> {
+  let timer: NodeJS.Timeout | undefined;
+  const status = new Promise<{ kind: 'live-status' }>((resolve) => {
+    timer = setTimeout(() => resolve({ kind: 'live-status' }), delayMs);
+  });
+  try {
+    return await Promise.race([
+      pendingNext.then((next) => ({ kind: 'event' as const, next })),
+      status,
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function withLiveStatus(
+  state: RunState,
+  runStart: number,
+  lastAgentActivityAt: number,
+  now: number,
+): RunState {
+  return {
+    ...state,
+    liveStatus: {
+      elapsedSeconds: Math.max(0, Math.floor((now - runStart) / 1000)),
+      idleSeconds: Math.max(0, Math.floor((now - lastAgentActivityAt) / 1000)),
+    },
+  };
+}
+
+function isTerminalAgentEvent(event: AgentEvent): boolean {
+  return event.type === 'done' || event.type === 'error';
+}
+
+interface LazyProgressStream {
+  readonly settled: Promise<unknown>;
+  opened(): boolean;
+  ensureOpen(): boolean;
+  abandoned(): boolean;
+  abandon(): void;
+}
+
+function createLazyProgressStream(
+  scope: string,
+  mode: 'card' | 'markdown',
+  open: () => Promise<unknown>,
+): LazyProgressStream {
+  let stream: Promise<unknown> | undefined;
+  let givenUp = false;
+  let settle!: (result: Promise<unknown>) => void;
+  const settled = new Promise<unknown>((resolve, reject) => {
+    settle = (result) => result.then(resolve, reject);
+  });
+  return {
+    settled,
+    opened: () => stream !== undefined,
+    ensureOpen: () => {
+      if (stream) return false;
+      log.info('outbound', 'progress-stream-open', { scope, mode });
+      stream = open();
+      settle(stream);
+      return true;
+    },
+    abandoned: () => givenUp,
+    abandon: () => {
+      givenUp = true;
+    },
+  };
+}
+
+function shouldOpenProgressStream(state: RunState): boolean {
+  if (state.terminal !== 'running') return false;
+  return renderText({ ...state, footer: null }).trim() !== '';
+}
+
+function hasVisibleProgress(state: RunState, mode: 'card' | 'markdown'): boolean {
+  if (renderText(state).trim()) return true;
+  return mode === 'card' && state.reasoning.content.trim().length > 0;
+}
+
+function recallIfEmptyStreamedReply(
+  channel: LarkChannel,
+  progress: LazyProgressStream,
+  finalState: RunState,
+  scope: string,
+  mode: 'card' | 'markdown',
+  messageId: string | undefined,
+): void {
+  if (!progress.opened()) return;
+  if (!progress.abandoned() && hasVisibleProgress(finalState, mode)) return;
+  recallStreamedReply(channel, progress, scope, messageId);
+}
+
+function recallStreamedReply(
+  channel: LarkChannel,
+  progress: LazyProgressStream,
+  scope: string,
+  messageId: string | undefined,
+): void {
+  if (!progress.opened()) return;
+  if (messageId) {
+    void recallStreamedMessage(channel, { messageId }, scope);
+    return;
+  }
+  void progress.settled.then(
+    (result) => recallStreamedMessage(channel, result, scope),
+    () => {},
+  );
+}
+
+async function recallStreamedMessage(
+  channel: LarkChannel,
+  streamResult: unknown,
+  scope: string,
+): Promise<void> {
+  const messageId = (streamResult as { messageId?: string } | undefined)?.messageId;
+  if (!messageId) return;
+  try {
+    await channel.recallMessage(messageId);
+    log.info('outbound', 'recall-empty', { scope, messageId });
+  } catch (err) {
+    log.warn('outbound', 'recall-empty-failed', {
+      scope,
+      messageId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 async function awaitRenderAwareStream(input: {
   mode: 'card' | 'markdown';
-  streamDone: Promise<unknown>;
+  progress: LazyProgressStream;
   renderDone: Promise<RunState>;
   producerStarted: () => boolean;
   fallback: (state: RunState) => Promise<void>;
 }): Promise<void> {
-  const streamResult = input.streamDone.then(
+  const streamResult = input.progress.settled.then(
     () => ({ kind: 'stream' as const, ok: true as const }),
     (err) => ({ kind: 'stream' as const, ok: false as const, err }),
   );
@@ -1069,8 +1534,8 @@ async function awaitRenderAwareStream(input: {
     return;
   }
 
-  if (!input.producerStarted()) {
-    log.warn('stream', 'producer-not-started-before-agent-terminal', { mode: input.mode });
+  if (!input.progress.opened()) {
+    log.info('outbound', 'progress-stream-skipped', { mode: input.mode });
     await runFallbackReply(input.mode, first.state, input.fallback);
     return;
   }
@@ -1080,10 +1545,16 @@ async function awaitRenderAwareStream(input: {
     delay(STREAM_TERMINAL_GRACE_MS).then(() => undefined),
   ]);
   if (!terminal) {
-    log.warn('stream', 'terminal-grace-expired', {
-      mode: input.mode,
-      graceMs: STREAM_TERMINAL_GRACE_MS,
-    });
+    input.progress.abandon();
+    if (input.producerStarted()) {
+      log.warn('stream', 'terminal-grace-expired', {
+        mode: input.mode,
+        graceMs: STREAM_TERMINAL_GRACE_MS,
+      });
+    } else {
+      log.warn('stream', 'producer-not-started-before-agent-terminal', { mode: input.mode });
+    }
+    await runFallbackReply(input.mode, first.state, input.fallback);
     void streamResult.then((result) => {
       if (!result.ok) {
         log.fail('stream', result.err, { mode: input.mode, step: 'stream-terminal-late' });
@@ -1091,7 +1562,68 @@ async function awaitRenderAwareStream(input: {
     });
     return;
   }
-  if (!terminal.ok) throw terminal.err;
+  if (!terminal.ok) {
+    input.progress.abandon();
+    log.fail('stream', terminal.err, {
+      mode: input.mode,
+      step: input.producerStarted() ? 'stream-terminal' : 'stream',
+    });
+    await runFallbackReply(input.mode, first.state, input.fallback);
+  }
+}
+
+async function boundedProgressUpdate(
+  update: () => Promise<void>,
+  mode: 'card' | 'markdown',
+): Promise<boolean> {
+  const result = await new Promise<
+    { ok: true } | { ok: false; err: unknown }
+  >((resolve) => {
+    let settled = false;
+    const finish = (next: { ok: true } | { ok: false; err: unknown }): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(next);
+    };
+    const timer = setTimeout(
+      () => finish({ ok: false, err: new Error(`progress ${mode} update timed out`) }),
+      PROGRESS_UPDATE_TIMEOUT_MS,
+    );
+    void Promise.resolve()
+      .then(update)
+      .then(
+        () => finish({ ok: true }),
+        (err) => finish({ ok: false, err }),
+      );
+  });
+  if (result.ok) return true;
+  log.fail('stream', result.err, {
+    mode,
+    step: 'progress-update',
+    timeoutMs: PROGRESS_UPDATE_TIMEOUT_MS,
+  });
+  return false;
+}
+
+function terminalNoticeOnlyState(state: RunState): RunState {
+  return {
+    ...state,
+    blocks: [],
+    finalText: undefined,
+    reasoning: { content: '', active: false },
+    footer: null,
+  };
+}
+
+function progressDisplayState(state: RunState): RunState {
+  if (state.terminal === 'running' || state.terminal === 'done') return state;
+  return {
+    ...state,
+    terminal: 'done',
+    errorMsg: undefined,
+    footer: null,
+  };
 }
 
 async function runFallbackReply(
@@ -1103,6 +1635,272 @@ async function runFallbackReply(
     await fallback(state);
   } catch (err) {
     log.fail('stream', err, { mode, step: 'fallback' });
+  }
+}
+
+async function sendCodexFinalReply(
+  channel: LarkChannel,
+  chatId: string,
+  state: RunState,
+  replyMode: 'card' | 'markdown' | 'text',
+  options: Parameters<LarkChannel['send']>[2],
+  renderOptions: Parameters<typeof renderCard>[1],
+): Promise<void> {
+  if (state.terminal !== 'done') return;
+  const { finalText: rawFinalText, ...rest } = state;
+  const finalText = rawFinalText?.trim() ? rawFinalText : EMPTY_RESULT_MARKDOWN;
+  if (replyMode !== 'card') {
+    const chunks = splitMarkdown(
+      finalText,
+      FINAL_MARKDOWN_MESSAGE_MAX_SERIALIZED_BYTES,
+    );
+    for (const chunk of chunks) {
+      await channel.send(chatId, rawMarkdownPost(chunk), options);
+    }
+    return;
+  }
+
+  const baseState: RunState = {
+    ...rest,
+    blocks: [],
+    reasoning: { content: '', active: false },
+    footer: null,
+  };
+  const cardChunks = splitMarkdown(
+    finalText,
+    FINAL_CARD_ELEMENT_MAX_SERIALIZED_BYTES,
+  );
+  const groups = groupFinalCardChunks(baseState, cardChunks, renderOptions);
+  let useMarkdownFallback = false;
+  for (const group of groups) {
+    if (!useMarkdownFallback) {
+      try {
+        await channel.send(
+          chatId,
+          { card: renderFinalCard(baseState, group, renderOptions) },
+          options,
+        );
+        continue;
+      } catch (err) {
+        log.fail('final-reply', err, { mode: replyMode, step: 'card-send' });
+        if (!isFormatError(err)) throw err;
+        useMarkdownFallback = true;
+      }
+    }
+    for (const cardChunk of group) {
+      for (const markdownChunk of splitMarkdown(
+        cardChunk,
+        FINAL_MARKDOWN_MESSAGE_MAX_SERIALIZED_BYTES,
+      )) {
+        await channel.send(chatId, rawMarkdownPost(markdownChunk), options);
+      }
+    }
+  }
+}
+
+async function sendTerminalNotice(
+  channel: LarkChannel,
+  chatId: string,
+  state: RunState,
+  replyMode: 'card' | 'markdown',
+  options: Parameters<LarkChannel['send']>[2],
+  renderOptions: Parameters<typeof renderCard>[1],
+): Promise<void> {
+  const noticeState = terminalNoticeOnlyState(state);
+  const markdown = renderText(noticeState);
+  if (!markdown.trim()) return;
+  if (replyMode !== 'card') {
+    await channel.send(chatId, rawMarkdownPost(markdown), options);
+    return;
+  }
+  try {
+    await channel.send(
+      chatId,
+      { card: renderCard(noticeState, renderOptions) },
+      options,
+    );
+  } catch (err) {
+    log.fail('final-reply', err, { mode: replyMode, step: 'terminal-card-send' });
+    if (!isFormatError(err)) throw err;
+    await channel.send(chatId, rawMarkdownPost(markdown), options);
+  }
+}
+
+function rawMarkdownPost(markdown: string): { post: object } {
+  return {
+    post: {
+      zh_cn: {
+        title: '',
+        content: [[{ tag: 'md', text: markdown }]],
+      },
+    },
+  };
+}
+
+function isFormatError(err: unknown): err is LarkChannelError {
+  return err instanceof LarkChannelError && err.code === 'format_error';
+}
+
+function groupFinalCardChunks(
+  baseState: RunState,
+  chunks: string[],
+  renderOptions: Parameters<typeof renderCard>[1],
+): string[][] {
+  const groups: string[][] = [];
+  let current: string[] = [];
+  for (const chunk of chunks) {
+    const candidate = [...current, chunk];
+    const card = renderFinalCard(baseState, candidate, renderOptions);
+    const tooLarge =
+      candidate.length > FINAL_CARD_MAX_ELEMENTS ||
+      Buffer.byteLength(JSON.stringify(card)) > FINAL_CARD_MAX_SERIALIZED_BYTES;
+    if (current.length > 0 && tooLarge) {
+      groups.push(current);
+      current = [chunk];
+    } else {
+      current = candidate;
+    }
+  }
+  if (current.length > 0) groups.push(current);
+  return groups;
+}
+
+function renderFinalCard(
+  baseState: RunState,
+  chunks: string[],
+  renderOptions: Parameters<typeof renderCard>[1],
+): object {
+  return renderCard(
+    {
+      ...baseState,
+      blocks: chunks.map((content) => ({ kind: 'text', content, streaming: false })),
+    },
+    renderOptions,
+  );
+}
+
+interface MarkdownFence {
+  marker: string;
+  opener: string;
+}
+
+function splitMarkdown(value: string, maxSerializedBytes: number): string[] {
+  const chunks: string[] = [];
+  let current = '';
+  let fence: MarkdownFence | undefined;
+
+  const fits = (content: string, openFence = fence): boolean =>
+    markdownElementBytes(withClosingFence(content, openFence)) <= maxSerializedBytes;
+  const flush = (): void => {
+    if (!current) return;
+    chunks.push(withClosingFence(current, fence));
+    current = fence?.opener ?? '';
+  };
+
+  for (const line of value.match(/[^\n]*\n|[^\n]+/g) ?? []) {
+    const fenceAfterLine = transitionFence(line, fence);
+    if (fits(current + line, fenceAfterLine)) {
+      current += line;
+      fence = fenceAfterLine;
+      continue;
+    }
+
+    flush();
+    let remaining = line;
+    while (remaining) {
+      if (fits(current + remaining, fenceAfterLine)) {
+        current += remaining;
+        fence = fenceAfterLine;
+        remaining = '';
+        break;
+      }
+
+      const piece = largestFittingPrefix(
+        remaining,
+        (prefix) => fits(current + prefix, fence),
+      );
+      if (!piece) {
+        // A pathological fence opener can consume the whole budget. Preserve
+        // forward progress even though that single malformed line cannot be
+        // made into a valid bounded markdown element.
+        const [first = ''] = Array.from(remaining);
+        current += first;
+        remaining = remaining.slice(first.length);
+      } else {
+        current += piece;
+        remaining = remaining.slice(piece.length);
+      }
+      flush();
+    }
+  }
+
+  if (current) chunks.push(withClosingFence(current, fence));
+  return chunks;
+}
+
+function markdownElementBytes(content: string): number {
+  return Buffer.byteLength(JSON.stringify({ tag: 'markdown', content }));
+}
+
+function withClosingFence(content: string, fence: MarkdownFence | undefined): string {
+  if (!fence) return content;
+  // CommonMark treats EOF as a valid end for an unclosed fenced block. When a
+  // chunk ends mid-line, rely on that rule instead of inserting a newline that
+  // would mutate copied minified code or single-line JSON.
+  if (!content.endsWith('\n')) return content;
+  return `${content}${fence.marker}\n`;
+}
+
+function transitionFence(
+  line: string,
+  current: MarkdownFence | undefined,
+): MarkdownFence | undefined {
+  const body = line.replace(/\r?\n$/, '');
+  const match = body.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+  if (!match) return current;
+  const marker = match[1] ?? '';
+  const suffix = match[2] ?? '';
+  if (current) {
+    const closes =
+      marker[0] === current.marker[0] &&
+      marker.length >= current.marker.length &&
+      suffix.trim() === '';
+    return closes ? undefined : current;
+  }
+  if (marker[0] === '`' && suffix.includes('`')) return undefined;
+  return { marker, opener: `${body}\n` };
+}
+
+function largestFittingPrefix(
+  value: string,
+  fits: (prefix: string) => boolean,
+): string {
+  const chars = Array.from(value);
+  let low = 0;
+  let high = chars.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (fits(chars.slice(0, mid).join(''))) low = mid;
+    else high = mid - 1;
+  }
+  return chars.slice(0, low).join('');
+}
+
+async function sendCompletionSummary(
+  channel: LarkChannel,
+  chatId: string,
+  state: RunState,
+  options: Parameters<LarkChannel['send']>[2],
+): Promise<void> {
+  const summary = renderCompletionSummary(state);
+  if (!summary) return;
+  try {
+    await channel.send(chatId, { text: summary }, options);
+    log.info('completion-summary', 'sent', { chars: summary.length });
+    reportMetric('completion_summary_sent', 1);
+  } catch (err) {
+    log.fail('completion-summary', err, { step: 'send' });
+    reportMetric('completion_summary_fail', 1);
   }
 }
 

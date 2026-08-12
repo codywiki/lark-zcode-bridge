@@ -1,10 +1,12 @@
+import { mkdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CardActionEvent, NormalizedMessage } from '@larksuite/channel';
-import { claudeCapability, codexCapability } from '../../../src/agent/capability.js';
+import { capabilityForProfile } from '../../../src/agent/capability.js';
 import { ActiveRuns } from '../../../src/bot/active-runs.js';
 import type { ChatModeCache } from '../../../src/bot/chat-mode-cache.js';
 import { PendingQueue } from '../../../src/bot/pending-queue.js';
+import { commandSessionCatalogIdentity } from '../../../src/bot/session-catalog-identity.js';
 import { handleCardAction } from '../../../src/card/dispatcher.js';
 import { tryHandleCommand, type CommandContext, type Controls } from '../../../src/commands/index.js';
 import { createDefaultProfileConfig, type AgentKind, type ProfileConfig } from '../../../src/config/profile-schema.js';
@@ -32,7 +34,11 @@ interface Harness {
   codexHistory: CodexThreadHistoryEntry[];
   activeRuns: ActiveRuns;
   pending: PendingQueue;
-  run(content: string, options?: { withCatalogIdentity?: boolean; chatMode?: 'p2p' | 'group' | 'topic' }): Promise<boolean>;
+  run(content: string, options?: {
+    withCatalogIdentity?: boolean;
+    catalogIdentity?: SessionCatalogIdentity;
+    chatMode?: 'p2p' | 'group' | 'topic';
+  }): Promise<boolean>;
   dispatchResumeArg(arg: string): Promise<void>;
 }
 
@@ -59,6 +65,63 @@ describe('agent-aware resume commands', () => {
     expect(h.catalog.activeFor({ ...h.identity, agentId: 'codex' })).toMatchObject({
       threadId: 'thread-other-agent',
     });
+  });
+
+  it('switches model by clearing the current resumable Claude session', async () => {
+    const h = await createHarness('claude');
+    h.sessions.set('chat-1', 'sess-current', h.identity.cwdRealpath);
+    h.catalog.upsertActive({ ...h.identity, sessionId: 'sess-current', now: 1000 });
+
+    await expect(h.run('/model gpt-5 high')).resolves.toBe(true);
+
+    expect(h.catalog.activeFor(h.identity)).toBeUndefined();
+    expect(h.sessions.resumeFor('chat-1', h.identity.cwdRealpath)).toBeUndefined();
+    expect(h.sessions.getModel('chat-1')).toBe('gpt-5');
+    expect(h.sessions.getReasoningEffort('chat-1')).toBe('high');
+    expect(lastMarkdown(h.channel)).toContain('下一条消息会启动新 session');
+  });
+
+  it('switches model by clearing the current resumable Codex thread', async () => {
+    const h = await createHarness('codex');
+    h.catalog.upsertActive({ ...h.identity, threadId: 'thread-current', now: 1000 });
+
+    await expect(h.run('/model gpt-5.6-sol ultra')).resolves.toBe(true);
+
+    expect(h.catalog.activeFor(h.identity)).toBeUndefined();
+    expect(h.sessions.getModel('chat-1')).toBe('gpt-5.6-sol');
+    expect(h.sessions.getReasoningEffort('chat-1')).toBe('ultra');
+  });
+
+  it('switches model by clearing the current resumable Kimi session', async () => {
+    const h = await createHarness('kimi');
+    h.sessions.set('chat-1', 'sess-current', h.identity.cwdRealpath);
+    h.catalog.upsertActive({ ...h.identity, sessionId: 'sess-current', now: 1000 });
+
+    await expect(h.run('/model kimi/k2')).resolves.toBe(true);
+
+    expect(h.catalog.activeFor(h.identity)).toBeUndefined();
+    expect(h.sessions.resumeFor('chat-1', h.identity.cwdRealpath)).toBeUndefined();
+    expect(h.sessions.getModel('chat-1')).toBe('kimi/k2');
+    expect(h.sessions.getReasoningEffort('chat-1')).toBeUndefined();
+    expect(lastMarkdown(h.channel)).toContain('下一条消息会启动新 session');
+  });
+
+  it('rejects Kimi reasoning-effort arguments without changing model state', async () => {
+    const h = await createHarness('kimi');
+
+    await expect(h.run('/model kimi-k2 high')).resolves.toBe(true);
+
+    expect(h.sessions.getModel('chat-1')).toBeUndefined();
+    expect(h.sessions.getReasoningEffort('chat-1')).toBeUndefined();
+    expect(lastMarkdown(h.channel)).toContain('Kimi Code 当前只支持切换模型 id');
+  });
+
+  it('explains that Kimi cloud-document comments are disabled during the pilot', async () => {
+    const h = await createHarness('kimi');
+
+    await expect(h.run('/doc')).resolves.toBe(true);
+
+    expect(lastMarkdown(h.channel)).toContain('暂不处理云文档评论');
   });
 
   it('allows resume use only for the current agent/cwd/policy catalog entry', async () => {
@@ -175,6 +238,18 @@ describe('agent-aware resume commands', () => {
     expect(lastMarkdown(h.channel)).toContain('当前上下文没有可恢复的 Codex thread');
   });
 
+  it('does not fall back to legacy SessionStore when Kimi catalog identity is missing', async () => {
+    const h = await createHarness('kimi');
+    h.sessions.set('chat-1', 'legacy-current', h.identity.cwdRealpath);
+
+    await expect(
+      h.run('/resume use cross-policy-session', { withCatalogIdentity: false }),
+    ).resolves.toBe(true);
+
+    expect(h.sessions.resumeFor('chat-1', h.identity.cwdRealpath)).toBe('legacy-current');
+    expect(lastMarkdown(h.channel)).toContain('没有符合当前工作区和权限策略的 Kimi session');
+  });
+
   it('does not list Claude local history for Codex when no current thread is recorded', async () => {
     const h = await createHarness('codex');
 
@@ -264,6 +339,78 @@ describe('agent-aware resume commands', () => {
 
     expect(lastMarkdown(h.channel)).toContain('请先使用 /cd');
   });
+
+  it('does not build a Kimi resume identity outside the profile default root', async () => {
+    const h = await createHarness('kimi');
+    const outside = join(h.tmp.root, 'outside-workspace');
+    await mkdir(outside, { recursive: true });
+    h.workspaces.setCwd('chat-1', outside);
+
+    const identity = await commandSessionCatalogIdentity({
+      msg: message('/resume'),
+      scope: 'chat-1',
+      mode: 'p2p',
+      workspaces: h.workspaces,
+      controls: h.controls,
+      access: canUseDm(h.controls.profileConfig, h.controls, 'ou-user'),
+    });
+
+    expect(identity).toBeUndefined();
+  });
+
+  it('builds and uses a Kimi resume identity in an additional authorized root', async () => {
+    const h = await createHarness('kimi');
+    const additionalRoot = join(h.tmp.root, 'authorized-project');
+    const additionalCwd = join(additionalRoot, 'packages', 'app');
+    await mkdir(additionalCwd, { recursive: true });
+    h.controls.profileConfig.workspaces.allowedRoots = [await realpath(additionalRoot)];
+    h.workspaces.setCwd('chat-1', additionalCwd);
+
+    const identity = await commandSessionCatalogIdentity({
+      msg: message('/resume'),
+      scope: 'chat-1',
+      mode: 'p2p',
+      workspaces: h.workspaces,
+      controls: h.controls,
+      access: canUseDm(h.controls.profileConfig, h.controls, 'ou-user'),
+    });
+    expect(identity?.cwdRealpath).toBe(await realpath(additionalCwd));
+    if (!identity) throw new Error('expected additional-root identity');
+    h.catalog.upsertActive({ ...identity, sessionId: 'kimi-additional-session', now: 1000 });
+
+    await expect(h.run('/resume', { catalogIdentity: identity })).resolves.toBe(true);
+    const nonce = resumeNonce(lastMarkdown(h.channel));
+    await expect(
+      h.run(`/resume use ${nonce}`, { catalogIdentity: identity }),
+    ).resolves.toBe(true);
+
+    expect(h.sessions.resumeFor('chat-1', identity.cwdRealpath)).toBe(
+      'kimi-additional-session',
+    );
+    await expect(h.run('/status', { catalogIdentity: identity })).resolves.toBe(true);
+    const status = lastContentString(h.channel);
+    expect(status).toContain('kimi-add');
+    expect(status).toContain(JSON.stringify(identity.cwdRealpath).slice(1, -1));
+  });
+
+  it('does not render a stale Kimi cwd outside all authorized roots', async () => {
+    const h = await createHarness('kimi');
+    const additionalRoot = join(h.tmp.root, 'authorized-project');
+    const outside = join(h.tmp.root, 'outside-workspace');
+    await Promise.all([
+      mkdir(additionalRoot, { recursive: true }),
+      mkdir(outside, { recursive: true }),
+    ]);
+    h.controls.profileConfig.workspaces.allowedRoots = [await realpath(additionalRoot)];
+    h.workspaces.setCwd('chat-1', outside);
+
+    await expect(h.run('/resume', { withCatalogIdentity: false })).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('请先使用 /cd');
+    expect(lastMarkdown(h.channel)).not.toContain(outside);
+
+    await expect(h.run('/status', { withCatalogIdentity: false })).resolves.toBe(true);
+    expect(lastContentString(h.channel)).not.toContain(outside);
+  });
 });
 
 async function createHarness(
@@ -281,8 +428,9 @@ async function createHarness(
   const pending = new PendingQueue(60_000, () => {});
   const agent = createFakeAgent();
   const profileConfig = appConfig(agentKind);
+  const workspaceRealpath = await realpath(tmp.workspace);
   if (options.defaultWorkspace !== false) {
-    profileConfig.workspaces.default = tmp.workspace;
+    profileConfig.workspaces.default = workspaceRealpath;
   }
   const controls = {
     profile: agentKind,
@@ -297,16 +445,20 @@ async function createHarness(
     processId: 'proc-1',
   } satisfies Controls;
   if (options.bindWorkspace !== false) {
-    workspaces.setCwd('chat-1', tmp.workspace);
+    workspaces.setCwd('chat-1', workspaceRealpath);
   }
-  const identity = await commandIdentity(agentKind, profileConfig, controls, tmp.workspace);
+  const identity = await commandIdentity(agentKind, profileConfig, controls, workspaceRealpath);
   const chatModeCache = {
     resolve: async () => 'p2p',
   } as unknown as ChatModeCache;
 
   const run = (
     content: string,
-    runOptions: { withCatalogIdentity?: boolean; chatMode?: 'p2p' | 'group' | 'topic' } = {},
+    runOptions: {
+      withCatalogIdentity?: boolean;
+      catalogIdentity?: SessionCatalogIdentity;
+      chatMode?: 'p2p' | 'group' | 'topic';
+    } = {},
   ): Promise<boolean> =>
     tryHandleCommand({
       channel: channel as unknown as CommandContext['channel'],
@@ -315,7 +467,10 @@ async function createHarness(
       chatMode: runOptions.chatMode ?? 'p2p',
       sessions,
       sessionCatalog: catalog,
-      sessionCatalogIdentity: runOptions.withCatalogIdentity === false ? undefined : identity,
+      sessionCatalogIdentity:
+        runOptions.withCatalogIdentity === false
+          ? undefined
+          : (runOptions.catalogIdentity ?? identity),
       workspaces,
       agent,
       activeRuns,
@@ -382,7 +537,7 @@ async function commandIdentity(
 ): Promise<SessionCatalogIdentity> {
   const workspace = await resolveWorkingDirectory(cwd);
   if (!workspace.ok) throw new Error(workspace.userVisible);
-  const capability = agentKind === 'codex' ? codexCapability(profileConfig) : claudeCapability(profileConfig);
+  const capability = capabilityForProfile(profileConfig);
   const access = canUseDm(profileConfig, controls, 'ou-user');
   const policy = evaluateRunPolicy({
     scope: {
@@ -416,6 +571,7 @@ function appConfig(agentKind: AgentKind): ProfileConfig {
     accounts: { app: { id: 'app-id', secret: 'secret', tenant: 'feishu' } },
     access: { admins: ['ou-user'] },
     ...(agentKind === 'codex' ? { codex: { binaryPath: '/usr/local/bin/codex' } } : {}),
+    ...(agentKind === 'kimi' ? { kimi: { binaryPath: '/usr/local/bin/kimi' } } : {}),
   });
 }
 
