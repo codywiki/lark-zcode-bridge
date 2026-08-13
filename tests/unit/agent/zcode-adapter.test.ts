@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   parseZcodeHeadlessResult,
   ZcodeAdapter,
+  zcodeFailureMessage,
   zcodePermissionMode,
 } from '../../../src/agent/zcode/adapter.js';
 import type { AgentEvent } from '../../../src/agent/types.js';
@@ -224,5 +225,47 @@ console.log(JSON.stringify({
       adapter.run({ runId: 'r8', prompt: 'hi', cwd: stateDir, reasoningEffort: 'ultra' }),
     );
     expect(mainModelReasoning()).toBeUndefined();
+  });
+});
+
+describe('zcodeFailureMessage', () => {
+  const MAC = '/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs';
+  const WIN = 'C:\\Program Files\\ZCode\\resources\\glm\\zcode.cjs';
+
+  it('folds the exact macOS bundle path', () => {
+    const msg = zcodeFailureMessage(1, `boom at ${MAC} failed`, undefined, MAC);
+    expect(msg).toBe('zcode exited with code 1: boom at zcode failed');
+    expect(msg).not.toContain('ZCode.app');
+  });
+
+  it('folds an exact Windows path containing spaces without truncation', () => {
+    const msg = zcodeFailureMessage(1, `cannot load "${WIN}"`, undefined, WIN);
+    expect(msg).toContain('"zcode"');
+    expect(msg).not.toContain('Program Files');
+  });
+
+  it('keeps line:col suffix from stack frames', () => {
+    const msg = zcodeFailureMessage(1, `at Object.<anonymous> (${MAC}:123:45)`, undefined, MAC);
+    expect(msg).toContain('(zcode:123:45)');
+  });
+
+  it('folds a re-resolved/symlinked path via the fallback regex', () => {
+    const other = '/private/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs';
+    const msg = zcodeFailureMessage(1, `err ${other}`, undefined, MAC);
+    expect(msg).not.toContain('zcode.cjs');
+  });
+
+  it('leaves unrelated stderr and bare prose mentions alone', () => {
+    expect(zcodeFailureMessage(2, 'some unrelated error', undefined, MAC)).toBe(
+      'zcode exited with code 2: some unrelated error',
+    );
+    expect(zcodeFailureMessage(2, 'the file zcode.cjs is needed', undefined, MAC)).toContain(
+      'the file zcode.cjs is needed',
+    );
+  });
+
+  it('prefers the runtime error message when present', () => {
+    const msg = zcodeFailureMessage(1, 'detail', new Error('spawn blew up'), MAC);
+    expect(msg).toContain('zcode runtime error: spawn blew up');
   });
 });

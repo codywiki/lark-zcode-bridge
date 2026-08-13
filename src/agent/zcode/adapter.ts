@@ -42,7 +42,7 @@ export const ZCODE_MODEL_CONFIG_HINT =
   `或在创建 profile 前设置 ${ZCODE_API_KEY_ENV} 环境变量。`;
 
 export interface ZcodeAdapterOptions {
-  /** Absolute path to zcode.cjs inside ZCode.app. */
+  /** Absolute path to the ZCode bundled CLI (zcode.cjs) for this platform. */
   runtimePath?: string;
   /** Node executable used to launch the runtime; defaults to process.execPath. */
   nodePath?: string;
@@ -130,8 +130,8 @@ export class ZcodeAdapter implements AgentAdapter {
       binaryPath: this.nodePath,
       args: [this.runtimePath, 'version'],
     });
-    // ZCode.app self-updates the bundled runtime, so a version drift from the
-    // bootstrap recording is logged for support but never blocks the run
+    // The ZCode desktop app self-updates the bundled runtime, so a version drift
+    // from the bootstrap recording is logged for support but never blocks the run
     // (fail-closed version pins took the Kimi bridge down on every update).
     if (availability.ok && this.recordedVersion && availability.version !== this.recordedVersion) {
       log.warn('agent', 'version-drift', {
@@ -244,7 +244,7 @@ export class ZcodeAdapter implements AgentAdapter {
     return {
       runId: opts.runId,
       pid: child.pid,
-      events: createEventStream(child, () => runtimeError, () => stopping, outputGuard.closed),
+      events: createEventStream(child, () => runtimeError, () => stopping, outputGuard.closed, this.runtimePath),
       stop(): Promise<void> {
         if (stopPromise) return stopPromise;
         stopping = true;
@@ -294,6 +294,7 @@ async function* createEventStream(
   getError: () => Error | undefined,
   isStopping: () => boolean,
   outputClosed: Promise<void>,
+  runtimePath: string,
 ): AsyncGenerator<AgentEvent> {
   if (!child.pid) {
     const err = getError();
@@ -332,7 +333,7 @@ async function* createEventStream(
   if (exitCode !== 0) {
     yield {
       type: 'error',
-      message: zcodeFailureMessage(exitCode, stderr, runtimeError),
+      message: zcodeFailureMessage(exitCode, stderr, runtimeError, runtimePath),
       terminationReason: 'failed',
     };
     return;
@@ -446,18 +447,25 @@ function tryParseJson(text: string): unknown {
   }
 }
 
-function zcodeFailureMessage(
+/** Exported for tests: fold the runtime path out of a failure message. */
+export function zcodeFailureMessage(
   exitCode: number | null,
   stderr: string,
   runtimeError: Error | undefined,
+  runtimePath: string,
 ): string {
   // stderr is provider-controlled text (API errors, stack traces). ZCode does
   // not print the configured API key on failure paths; keep the excerpt short
-  // and strip the bundled-runtime path noise (macOS .app bundle, Windows
-  // resources dir, etc.) so the message reads the same on every platform.
-  const detail = stderr
-    .trim()
-    .replaceAll(/[^\s]*zcode\.cjs/g, 'zcode')
+  // and fold the runtime's own path down to "zcode" so the message reads the
+  // same on every platform. Two passes:
+  //   1. exact replacement of the configured runtime path — handles absolute
+  //      paths containing spaces (e.g. "C:\Program Files\ZCode\...") that a
+  //      separator-anchored regex would cut short.
+  //   2. fallback: any other path-shaped token ending in the runtime filename,
+  //      for stack frames that reference a re-resolved/symlinked location.
+  const folded = stderr.trim().split(runtimePath).join('zcode');
+  const detail = folded
+    .replaceAll(/(?:[A-Za-z]:)?(?:[\/\\][^\s"'():]+)*[\/\\]zcode\.cjs/g, 'zcode')
     .slice(0, 500);
   const base = runtimeError
     ? `zcode runtime error: ${runtimeError.message}`

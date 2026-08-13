@@ -41,7 +41,7 @@ export interface SandboxConfig {
  * never reads or writes the user's real `~/.zcode`.
  */
 export interface ZcodeConfig {
-  /** Absolute path to `zcode.cjs` inside the ZCode.app bundle. */
+  /** Absolute path to the ZCode bundled CLI (`zcode.cjs`) for this platform. */
   runtimePath: string;
   /** Node executable used to launch the runtime. Defaults to process.execPath. */
   nodePath?: string;

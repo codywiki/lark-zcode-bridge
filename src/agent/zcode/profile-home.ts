@@ -32,8 +32,8 @@ import { dirname, join } from 'node:path';
 export const ZCODE_DEFAULT_RUNTIME_PATH =
   '/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs';
 
-/** Relative location of the bundled CLI inside the macOS .app bundle. */
-const MACOS_APP_RUNTIME_REL = 'Contents/Resources/glm/zcode.cjs';
+/** Relative location of the bundled CLI inside an installed ZCode app. */
+const APP_RUNTIME_REL = join('resources', 'glm', 'zcode.cjs');
 
 /**
  * Candidate install roots for the ZCode desktop app on Windows, in priority
@@ -42,7 +42,6 @@ const MACOS_APP_RUNTIME_REL = 'Contents/Resources/glm/zcode.cjs';
  * `<root>/resources/glm/zcode.cjs` (Electron lowercases the folder).
  */
 function windowsRuntimeCandidates(env: NodeJS.ProcessEnv): string[] {
-  const rel = join('resources', 'glm', 'zcode.cjs');
   const roots: string[] = [];
   const localAppData = env.LOCALAPPDATA;
   if (localAppData) {
@@ -52,15 +51,14 @@ function windowsRuntimeCandidates(env: NodeJS.ProcessEnv): string[] {
   for (const pf of [env.ProgramFiles, env['ProgramFiles(x86)']]) {
     if (pf) roots.push(join(pf, 'ZCode'));
   }
-  return roots.map((root) => join(root, rel));
+  return roots.map((root) => join(root, APP_RUNTIME_REL));
 }
 
 /** Candidate locations for a Linux install (AppImage-extracted / unpacked). */
 function linuxRuntimeCandidates(env: NodeJS.ProcessEnv): string[] {
-  const rel = join('resources', 'glm', 'zcode.cjs');
   const home = env.HOME ?? '';
   const roots = ['/opt/ZCode', '/usr/lib/ZCode', ...(home ? [join(home, '.local', 'lib', 'ZCode')] : [])];
-  return roots.map((root) => join(root, rel));
+  return roots.map((root) => join(root, APP_RUNTIME_REL));
 }
 
 /**

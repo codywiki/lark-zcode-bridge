@@ -58,9 +58,10 @@ async function ensureManagedDefaultWorkspace(path: string): Promise<string> {
 }
 
 /**
- * The ZCode runtime is the bundled `zcode.cjs` inside ZCode.app; bootstrap
- * only verifies the file is readable (no PATH resolution — it is not a $PATH
- * binary) so a missing ZCode install fails fast at profile creation.
+ * The ZCode runtime is the bundled `zcode.cjs` shipped inside the ZCode desktop
+ * app (located per platform); bootstrap only verifies the file is readable
+ * (no PATH resolution — it is not a $PATH binary) so a missing ZCode install
+ * fails fast at profile creation.
  */
 export async function createBootstrapZcodeConfig(
   runtimePath: string | undefined,
