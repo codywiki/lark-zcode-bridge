@@ -9,11 +9,15 @@
 ## 主要功能
 
 - 把飞书 / Lark 消息转发给本地 ZCode CLI。私聊直接发，群里 `@bot` 即可。
+- **跨平台**：支持 macOS、Windows、Linux——bridge 在各系统上自动定位 ZCode 内置运行时，并按平台管理常驻服务（launchd / systemd / 任务计划程序）。
 - **流式卡片**：回复在一张卡片上实时更新，每次运行结束再补一条有长度上限的纯文本结果摘要。
 - **会话连续**：每个私聊、话题、文档评论线程各自维护独立的 ZCode session（`--resume sess_<id>`）。
 - **排队与合批**：连发的消息合并处理；运行中发来的消息排队到下一轮，`/new`、`/cd`、`/stop` 等命令可打断当前任务。
 - **多工作区**：`/cd` 切换当前项目，`/ws` 保存和复用常用目录。
-- **图片和文件**：直接发给 bot，bridge 下载到本地后通过 `--attach` 传给 ZCode。
+- **图片和文件**：直接发给 bot，bridge 下载到本地后通过 `--attach` 传给 ZCode；引用回复、合并转发里的附件也会一并解析。
+- **云文档评论**：在文档评论线程里 `@bot`，bridge 会把文档内容拉进来作为上下文，并把回复发回该评论线程。
+- **模型与推理控制**：`/model` 切换主模型，`/effort` 调整单次请求的推理强度。
+- **隔离的 ZCode home**：每个 profile 用独立的 `HOME`（`~/.lark-zcode-bridge/profiles/<name>/zcode-home`）运行，绝不读写你真实的 `~/.zcode` 和里面的 API Key。
 - **交互卡片**：`/help`、`/ws list`、`/status` 返回可点击按钮的卡片。
 
 ## 前置条件
@@ -100,13 +104,16 @@ bridge 会为每个 profile 投影一个当前 profile 的 lark-cli 目录（`pr
 
 ## 聊天内命令
 
-- `/new` — 开新会话
+- `/new`（或 `/reset`）— 开新会话
 - `/cd <路径>` — 切换工作区；`/ws list|use|save` — 管理已存工作区
 - `/status` — 查看当前会话、目录、权限模式
 - `/model <id>` — 切换本 profile 的主模型（`/model <id> <max|high|nothink>` 可同时设推理强度）
 - `/effort <max|high|nothink>` — 切换当前 session 的推理强度（最高/高/关闭思考；按请求生效，不打断会话）
 - `/resume` — 恢复当前 catalog 记录的会话
 - `/stop` — 打断正在运行的任务
+- `/timeout <分钟>` — 设置单次运行超时
+- `/doctor` — 自检当前 profile 的运行时与配置
+- `/ps` — 列出正在运行的任务
 - `/help` — 完整命令卡片
 
 ## 配置目录

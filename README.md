@@ -9,16 +9,19 @@ A lightweight bot that bridges Feishu / Lark messenger with your local **ZCode C
 ## What it does
 
 - Forwards Feishu / Lark messages to the local ZCode CLI. Send a DM directly, or `@bot` in a group.
+- **Cross-platform**: runs on macOS, Windows, and Linux — the bridge auto-detects the ZCode app's bundled runtime on each OS and manages a per-profile background service (launchd / systemd / Task Scheduler).
 - **Streaming card**: replies update on one Lark card in real time, with a bounded plain-text completion summary at the end of every run.
 - **Session continuity**: each chat, topic, or document comment thread keeps its own ZCode session (`--resume sess_<id>`).
 - **Queueing and batching**: messages sent in quick succession are handled together; messages sent during a run are queued, while commands like `/new`, `/cd`, and `/stop` can interrupt the current task.
 - **Multiple workspaces**: use `/cd` to switch the current project, and `/ws` to save and reuse common project directories.
-- **Images and files**: send them to the bot directly; the bridge downloads them locally and passes them to ZCode via `--attach`.
+- **Images and files**: send them to the bot directly; the bridge downloads them locally and passes them to ZCode via `--attach`. Attachments inside quoted and merged-forward messages are resolved too.
+- **Cloud-doc comments**: `@bot` in a document comment thread and the bridge answers with the document fetched in as context, posting the reply back into the thread.
+- **Model and reasoning control**: switch the main model with `/model` and the per-request reasoning effort with `/effort`.
+- **Isolated ZCode home**: every profile runs with its own `HOME` (`~/.lark-zcode-bridge/profiles/<name>/zcode-home`), so the bridge never touches your real `~/.zcode` or live API key.
 - **Interactive cards**: `/help`, `/ws list`, and `/status` return cards with clickable buttons.
 
 ## Prerequisites
 
-- Node.js **>= 20.12.0**
 - Node.js **>= 20.12.0**
 - The **ZCode desktop app** installed. The bridge drives the app's bundled runtime, located automatically per platform — `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs` on macOS, `%LOCALAPPDATA%\Programs\ZCode\resources\glm\zcode.cjs` (or a `Program Files` install) on Windows, and `/opt/ZCode/resources/glm/zcode.cjs` on Linux. Set `LARK_ZCODE_BRIDGE_RUNTIME_PATH` for non-standard installs.
 - A **GLM Coding Plan** API key (BigModel or z.ai).
@@ -85,7 +88,7 @@ Chat commands cannot expand this allowlist beyond owner-driven changes, and conf
 
 ## Workspaces
 
-Each run resolves exactly one canonical working directory — the currently selected one (单次运行只会拿到当前选中的一个规范化工作目录). `/cd <path>` switches it; `/ws save|use|list|remove` manages named shortcuts. The profile's fallback is `workspaces.default` in the config (created under `~/.lark-zcode-bridge-workspaces/<profile>/default` on first run).
+Each run resolves exactly one canonical working directory — the currently selected one. `/cd <path>` switches it; `/ws save|use|list|remove` manages named shortcuts. The profile's fallback is `workspaces.default` in the config (created under `~/.lark-zcode-bridge-workspaces/<profile>/default` on first run).
 
 ## Profiles
 
@@ -101,13 +104,16 @@ The bridge projects a profile-local lark-cli directory (`profiles/<name>/lark-cl
 
 ## Commands in chat
 
-- `/new` — start a fresh session
+- `/new` (or `/reset`) — start a fresh session
 - `/cd <path>` — switch workspace; `/ws list|use|save` — manage saved workspaces
 - `/status` — current session, cwd, permission mode
 - `/model <id>` — switch the profile's main model (`/model <id> <max|high|nothink>` also sets reasoning effort)
 - `/effort <max|high|nothink>` — switch the session's reasoning effort (per-request; does not reset the session)
 - `/resume` — resume the current catalog-tracked session
 - `/stop` — interrupt the running task
+- `/timeout <minutes>` — set the per-run timeout
+- `/doctor` — run a self-check of the profile's runtime and config
+- `/ps` — list running tasks
 - `/help` — full command card
 
 ## Configuration root
