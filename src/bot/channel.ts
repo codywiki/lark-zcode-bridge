@@ -68,7 +68,6 @@ import type { AppPaths } from '../config/app-paths';
 const DEBOUNCE_MS = 600;
 const STREAM_TERMINAL_GRACE_MS = 3000;
 const PROGRESS_UPDATE_TIMEOUT_MS = 3000;
-const CODEX_LIVE_STATUS = { initialDelayMs: 2_000, intervalMs: 60_000 } as const;
 const FINAL_CARD_ELEMENT_MAX_SERIALIZED_BYTES = 20_000;
 const FINAL_CARD_MAX_SERIALIZED_BYTES = 28_000;
 const FINAL_CARD_MAX_ELEMENTS = 10;
@@ -574,27 +573,6 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
 
-  // Refuse Kimi resources at intake as well as at the batch boundary below.
-  // This covers slash-command messages carrying an attachment (which never
-  // enter runAgentBatch) and drops any text already coalesced into that batch.
-  if (controls.profileConfig.agentKind === 'kimi' && msg.resources.length > 0) {
-    const dropped = pending.cancel(scope);
-    log.info('media', 'kimi-intake-rejected-before-download', {
-      scope,
-      resourceCount: msg.resources.length,
-      droppedPending: dropped.length,
-    });
-    await channel.send(
-      msg.chatId,
-      { markdown: KIMI_ATTACHMENT_REJECT_MESSAGE },
-      {
-        replyTo: msg.messageId,
-        ...(chatMode === 'topic' && msg.threadId ? { replyInThread: true } : {}),
-      },
-    );
-    return;
-  }
-
   const handled = await tryHandleCommand({
     channel,
     msg,
@@ -729,23 +707,6 @@ export async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
   }
 
-  // Kimi's organization-wide pilot is text-only. Reject the entire debounced
-  // batch before MediaCache.resolve() can download even one byte; otherwise
-  // an attachment could reach local disk despite the run itself being denied.
-  if (controls.profileConfig.agentKind === 'kimi' && resourceItems.length > 0) {
-    log.info('media', 'kimi-batch-rejected-before-download', {
-      scope,
-      resourceCount: resourceItems.length,
-    });
-    await channel.send(
-      chatId,
-      {
-        markdown: KIMI_ATTACHMENT_REJECT_MESSAGE,
-      },
-      sendOpts,
-    );
-    return;
-  }
   const attachments = await media.resolve(resourceItems, controls.profileConfig.attachments);
   if (attachments.length > 0) {
     log.info('media', 'resolved', { count: attachments.length });
@@ -812,17 +773,9 @@ export async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const handle = execution.handle;
   const eventStream = execution.subscribe();
   if (flow.resumeFrom) {
-    if (capability.agentId === 'kimi') {
-      log.info('session', 'resume', { agent: 'kimi', hasSession: true });
-    } else {
-      log.info('session', 'resume', { sessionId: flow.resumeFrom, cwd });
-    }
+    log.info('session', 'resume', { sessionId: flow.resumeFrom, cwd });
   } else {
-    if (capability.agentId === 'kimi') {
-      log.info('session', 'fresh', { agent: 'kimi' });
-    } else {
-      log.info('session', 'fresh', { cwd });
-    }
+    log.info('session', 'fresh', { cwd });
   }
   const recordSession = (evt: AgentEvent): void => {
     recordRunSessionEvent({
@@ -834,18 +787,10 @@ export async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       event: evt,
     });
     if (evt.type === 'system' && evt.sessionId) {
-      if (capability.agentId === 'kimi') {
-        log.info('session', 'set', { agent: 'kimi', hasSession: true });
-      } else {
-        log.info('session', 'set', { sessionId: evt.sessionId });
-      }
+      log.info('session', 'set', { sessionId: evt.sessionId });
     }
     if (evt.type === 'system' && evt.threadId) {
-      if (capability.agentId === 'kimi') {
-        log.info('session', 'set-thread', { agent: 'kimi', hasThread: true });
-      } else {
-        log.info('session', 'set-thread', { threadId: evt.threadId });
-      }
+      log.info('session', 'set-thread', { threadId: evt.threadId });
     }
   };
 
@@ -885,12 +830,7 @@ export async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           }),
       }
     : {};
-  const progressCardRenderOptions =
-    capability.agentId === 'codex'
-      ? { ...cardRenderOptions, compactProcess: true }
-      : cardRenderOptions;
-  const agentStreamOptions =
-    capability.agentId === 'codex' ? { liveStatus: CODEX_LIVE_STATUS } : undefined;
+  const progressCardRenderOptions = cardRenderOptions;
 
   // For non-card modes Claude's output doesn't surface visually until either
   // a first streamed token (markdown mode) or the whole run ends (text mode).
@@ -973,9 +913,8 @@ export async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             }
           }
         },
-        agentStreamOptions,
       );
-      if (capability.agentId !== 'codex') progress.ensureOpen();
+      progress.ensureOpen();
       const sendProgressFallback = async (state: RunState): Promise<void> => {
         const visibleState = progressDisplayState(filterForPrefs(state));
         if (!hasVisibleProgress(visibleState, replyMode)) return;
@@ -986,18 +925,13 @@ export async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         );
         fallbackSent = true;
       };
-      try {
-        await awaitRenderAwareStream({
-          mode: replyMode,
-          progress,
-          renderDone,
-          producerStarted: () => producerStarted,
-          fallback: sendProgressFallback,
-        });
-      } catch (err) {
-        if (capability.agentId !== 'codex') throw err;
-        log.fail('stream', err, { mode: replyMode, step: 'progress-stream' });
-      }
+      await awaitRenderAwareStream({
+        mode: replyMode,
+        progress,
+        renderDone,
+        producerStarted: () => producerStarted,
+        fallback: sendProgressFallback,
+      });
       recallIfEmptyStreamedReply(
         channel,
         progress,
@@ -1013,15 +947,6 @@ export async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       const visibleFinalState = filterForPrefs(finalState);
       if (visibleFinalState.terminal !== 'done') {
         await sendTerminalNotice(
-          channel,
-          chatId,
-          visibleFinalState,
-          replyMode,
-          sendOpts,
-          cardRenderOptions,
-        );
-      } else if (capability.agentId === 'codex') {
-        await sendCodexFinalReply(
           channel,
           chatId,
           visibleFinalState,
@@ -1047,9 +972,7 @@ export async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
               producerStarted = true;
               progressMessageId = ctrl.messageId;
               if (progress.abandoned()) {
-                if (capability.agentId !== 'codex') {
-                  await recallStreamedMessage(channel, ctrl, scope);
-                }
+                await recallStreamedMessage(channel, ctrl, scope);
                 return;
               }
               markdownCtrl = ctrl;
@@ -1094,9 +1017,8 @@ export async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             }
           }
         },
-        agentStreamOptions,
       );
-      if (capability.agentId !== 'codex') progress.ensureOpen();
+      progress.ensureOpen();
       const sendProgressFallback = async (state: RunState): Promise<void> => {
         const visibleState = progressDisplayState(filterForPrefs(state));
         const body = renderText(visibleState);
@@ -1111,16 +1033,14 @@ export async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         producerStarted: () => producerStarted,
         fallback: sendProgressFallback,
       });
-      if (capability.agentId !== 'codex') {
-        recallIfEmptyStreamedReply(
-          channel,
-          progress,
-          progressDisplayState(filterForPrefs(latestState)),
-          scope,
-          replyMode,
-          progressMessageId,
-        );
-      }
+      recallIfEmptyStreamedReply(
+        channel,
+        progress,
+        progressDisplayState(filterForPrefs(latestState)),
+        scope,
+        replyMode,
+        progressMessageId,
+      );
       const finalState = await renderDone;
       if (progressDeliveryFailed && !fallbackSent) {
         await runFallbackReply(replyMode, finalState, sendProgressFallback);
@@ -1135,20 +1055,8 @@ export async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           sendOpts,
           cardRenderOptions,
         );
-      } else if (capability.agentId === 'codex') {
-        await sendCodexFinalReply(
-          channel,
-          chatId,
-          visibleFinalState,
-          replyMode,
-          sendOpts,
-          cardRenderOptions,
-        );
       } else {
         await sendCompletionSummary(channel, chatId, finalState, sendOpts);
-      }
-      if (capability.agentId === 'codex') {
-        recallStreamedReply(channel, progress, scope, progressMessageId);
       }
     } else {
       // text mode: drain the agent stream without sending anything during
@@ -1163,20 +1071,9 @@ export async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         async () => {},
       );
       const visibleState = filterForPrefs(finalState);
-      if (capability.agentId === 'codex' && visibleState.terminal === 'done') {
-        await sendCodexFinalReply(
-          channel,
-          chatId,
-          visibleState,
-          replyMode,
-          sendOpts,
-          cardRenderOptions,
-        );
-      } else {
-        const body = renderText(visibleState);
-        if (body.trim()) {
-          await channel.send(chatId, { markdown: body }, sendOpts);
-        }
+      const body = renderText(visibleState);
+      if (body.trim()) {
+        await channel.send(chatId, { markdown: body }, sendOpts);
       }
     }
   } catch (err) {
@@ -1635,66 +1532,6 @@ async function runFallbackReply(
     await fallback(state);
   } catch (err) {
     log.fail('stream', err, { mode, step: 'fallback' });
-  }
-}
-
-async function sendCodexFinalReply(
-  channel: LarkChannel,
-  chatId: string,
-  state: RunState,
-  replyMode: 'card' | 'markdown' | 'text',
-  options: Parameters<LarkChannel['send']>[2],
-  renderOptions: Parameters<typeof renderCard>[1],
-): Promise<void> {
-  if (state.terminal !== 'done') return;
-  const { finalText: rawFinalText, ...rest } = state;
-  const finalText = rawFinalText?.trim() ? rawFinalText : EMPTY_RESULT_MARKDOWN;
-  if (replyMode !== 'card') {
-    const chunks = splitMarkdown(
-      finalText,
-      FINAL_MARKDOWN_MESSAGE_MAX_SERIALIZED_BYTES,
-    );
-    for (const chunk of chunks) {
-      await channel.send(chatId, rawMarkdownPost(chunk), options);
-    }
-    return;
-  }
-
-  const baseState: RunState = {
-    ...rest,
-    blocks: [],
-    reasoning: { content: '', active: false },
-    footer: null,
-  };
-  const cardChunks = splitMarkdown(
-    finalText,
-    FINAL_CARD_ELEMENT_MAX_SERIALIZED_BYTES,
-  );
-  const groups = groupFinalCardChunks(baseState, cardChunks, renderOptions);
-  let useMarkdownFallback = false;
-  for (const group of groups) {
-    if (!useMarkdownFallback) {
-      try {
-        await channel.send(
-          chatId,
-          { card: renderFinalCard(baseState, group, renderOptions) },
-          options,
-        );
-        continue;
-      } catch (err) {
-        log.fail('final-reply', err, { mode: replyMode, step: 'card-send' });
-        if (!isFormatError(err)) throw err;
-        useMarkdownFallback = true;
-      }
-    }
-    for (const cardChunk of group) {
-      for (const markdownChunk of splitMarkdown(
-        cardChunk,
-        FINAL_MARKDOWN_MESSAGE_MAX_SERIALIZED_BYTES,
-      )) {
-        await channel.send(chatId, rawMarkdownPost(markdownChunk), options);
-      }
-    }
   }
 }
 

@@ -8,7 +8,6 @@ import { runAgentBatch } from '../../../src/bot/channel.js';
 import { ProcessPool } from '../../../src/bot/process-pool.js';
 import type { Controls } from '../../../src/commands/index.js';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
-import type { AgentKind } from '../../../src/config/profile-schema.js';
 import type { MediaCache } from '../../../src/media/cache.js';
 import { RunExecutor } from '../../../src/runtime/run-executor.js';
 import { SessionStore } from '../../../src/session/store.js';
@@ -24,46 +23,25 @@ afterEach(async () => {
 });
 
 describe('stream completion summary', () => {
-  it.each(['claude', 'kimi'] satisfies AgentKind[])(
-    'sends the final assistant result after a long run for %s profiles',
-    async (agentKind) => {
-      const h = await createHarness(undefined, [
-        { type: 'text', delta: '我先检查运行配置。' },
-        ...toolEvents(8),
-        { type: 'text', delta: '已完成：邀请命令恢复，回归测试通过。' },
-        { type: 'done', terminationReason: 'normal' },
-      ], agentKind);
-
-      await h.run();
-
-      expect(h.channel.streams).toHaveLength(1);
-      expect(h.channel.sent).toHaveLength(1);
-      expect(h.channel.sent[0]?.options).toMatchObject({ replyTo: 'om-summary' });
-      const summary = JSON.stringify(h.channel.sent[0]?.content);
-      expect(summary).toContain('结果摘要');
-      expect(summary).toContain('邀请命令恢复');
-      expect(summary).not.toContain('private command');
-      expect(summary).not.toContain('private output');
-      expect(summary).not.toContain('我先检查运行配置');
-    },
-  );
-
-  it('uses the dedicated Codex final answer instead of a completion summary', async () => {
+  it('sends the final assistant result after a long run', async () => {
     const h = await createHarness(undefined, [
       { type: 'text', delta: '我先检查运行配置。' },
       ...toolEvents(8),
-      { type: 'final_text', content: 'CODEX_DEDICATED_FINAL' },
+      { type: 'text', delta: '已完成：邀请命令恢复，回归测试通过。' },
       { type: 'done', terminationReason: 'normal' },
-    ], 'codex');
+    ]);
 
     await h.run();
 
     expect(h.channel.streams).toHaveLength(1);
     expect(h.channel.sent).toHaveLength(1);
-    const finalReply = JSON.stringify(h.channel.sent[0]?.content);
-    expect(finalReply).toContain('CODEX_DEDICATED_FINAL');
-    expect(finalReply).not.toContain('结果摘要');
-    expect(finalReply).not.toContain('我先检查运行配置');
+    expect(h.channel.sent[0]?.options).toMatchObject({ replyTo: 'om-summary' });
+    const summary = JSON.stringify(h.channel.sent[0]?.content);
+    expect(summary).toContain('结果摘要');
+    expect(summary).toContain('邀请命令恢复');
+    expect(summary).not.toContain('private command');
+    expect(summary).not.toContain('private output');
+    expect(summary).not.toContain('我先检查运行配置');
   });
 
   it('does not send a follow-up summary after a short run', async () => {
@@ -92,12 +70,12 @@ describe('stream completion summary', () => {
     expect(JSON.stringify(h.channel.sent[0]?.content)).not.toContain('结果摘要');
   });
 
-  it('also sends the separate summary after a long Claude card stream', async () => {
+  it('also sends the separate summary after a long card stream', async () => {
     const h = await createHarness('card', [
       ...toolEvents(8),
       { type: 'text', delta: '卡片任务已完成。' },
       { type: 'done', terminationReason: 'normal' },
-    ], 'claude');
+    ]);
 
     await h.run();
 
@@ -125,7 +103,6 @@ describe('stream completion summary', () => {
 async function createHarness(
   replyMode: 'card' | 'markdown' | 'text' | undefined,
   events: AgentEvent[],
-  agentKind: AgentKind = 'claude',
 ): Promise<{
   channel: ReturnType<typeof createFakeChannel>;
   activePolicyFingerprints: Map<string, string>;
@@ -134,7 +111,7 @@ async function createHarness(
   const tmp = await createTmpProfile('completion-summary-');
   const workspace = await realpath(tmp.workspace);
   const profileConfig = createDefaultProfileConfig({
-    agentKind,
+    agentKind: 'zcode',
     accounts: {
       app: { id: 'cli_test', secret: '${APP_SECRET}', tenant: 'feishu' },
     },
@@ -145,13 +122,12 @@ async function createHarness(
           messageReplyMigrated: true,
         }
       : {},
-    ...(agentKind === 'codex' ? { codex: { binaryPath: '/usr/local/bin/codex' } } : {}),
-    ...(agentKind === 'kimi' ? { kimi: { binaryPath: '/usr/local/bin/kimi' } } : {}),
+    zcode: { runtimePath: join(tmp.root, 'zcode.cjs') },
   });
   profileConfig.workspaces.default = workspace;
   const sessions = new SessionStore(join(tmp.profile, 'sessions.json'));
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
-  const agent = new FakeAgentAdapter({ id: agentKind, events });
+  const agent = new FakeAgentAdapter({ id: 'zcode', events });
   const executor = new RunExecutor({
     agent,
     pool: new ProcessPool(() => 1),
@@ -164,7 +140,7 @@ async function createHarness(
     removeReaction: vi.fn(async () => {}),
   });
   const controls = {
-    profile: agentKind,
+    profile: 'zcode',
     profileConfig,
     botOwnerId: 'ou-user',
     ownerRefreshState: 'ok',

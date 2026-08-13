@@ -1,6 +1,7 @@
 import { constants } from 'node:fs';
 import { access } from 'node:fs/promises';
 import { delimiter, extname, isAbsolute, join } from 'node:path';
+import { ZCODE_DEFAULT_RUNTIME_PATH } from '../agent/zcode/profile-home';
 import type { AgentKind } from '../config/profile-schema';
 
 export type { AgentKind } from '../config/profile-schema';
@@ -45,22 +46,22 @@ function pathExts(): string[] {
     .filter(Boolean);
 }
 
+/** The ZCode runtime is a bundled .cjs file, so detect readability, not +x. */
+export async function resolveZcodeRuntimePath(command: string): Promise<string> {
+  await access(command, constants.R_OK);
+  return command;
+}
+
+export function defaultZcodeRuntimePath(): string {
+  return process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH ?? ZCODE_DEFAULT_RUNTIME_PATH;
+}
+
 export async function detectInstalledAgents(): Promise<DetectedAgent[]> {
-  const candidates: Array<{ kind: AgentKind; command: string }> = [
-    { kind: 'claude', command: process.env.LARK_CHANNEL_CLAUDE_BIN ?? 'claude' },
-    { kind: 'codex', command: process.env.LARK_CHANNEL_CODEX_BIN ?? 'codex' },
-    { kind: 'kimi', command: process.env.LARK_CHANNEL_KIMI_BIN ?? 'kimi' },
-  ];
-  const detected: DetectedAgent[] = [];
-  for (const candidate of candidates) {
-    try {
-      detected.push({
-        kind: candidate.kind,
-        binaryPath: await resolveExecutablePath(candidate.command),
-      });
-    } catch {
-      // Missing agents are reported by the caller based on the final count.
-    }
+  try {
+    return [
+      { kind: 'zcode', binaryPath: await resolveZcodeRuntimePath(defaultZcodeRuntimePath()) },
+    ];
+  } catch {
+    return [];
   }
-  return detected;
 }

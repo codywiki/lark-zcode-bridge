@@ -1,366 +1,130 @@
-# lark-channel-bridge
+# lark-zcode-bridge
 
-把飞书 / Lark 消息和本地 Claude Code、Codex CLI 或 Kimi Code CLI 打通的轻量 bot。用一条命令启动，扫码绑定 PersonalAgent 应用，然后在飞书里和本机编程助手对话，让它读图、处理文件、改代码。
+把飞书 / Lark 消息和本地 **ZCode CLI**（[ZCode](https://zcode.ai/) 桌面版内置的 headless 运行时，走 GLM Coding Plan）打通的轻量 bot。一条命令启动，扫码绑定 PersonalAgent 应用，然后在飞书里直接指挥 ZCode 读图、处理文件、改代码。
 
 [English README](./README.md)
 
-关于能实现的效果，详情可以阅读[飞书文档](https://larkcommunity.feishu.cn/docx/OaRIdFIRFoLM3xxTmKwcetHqn5e)
+> 社区项目，非飞书/Lark 或 ZCode 官方产品。fork 自 [lark-channel-bridge](https://github.com/zarazhangrui/feishu-claude-code-bridge)（MIT），裁剪为只服务 ZCode 的单 agent bridge。平台支持：**macOS**（运行时在 macOS 版 ZCode 应用包内）；其它平台未验证。
 
 ## 主要功能
 
-- 在飞书私聊直接发消息，或在群里 `@bot`，把任务转给本机 Claude Code / Codex CLI / Kimi Code CLI。
-- **流式卡片**：文本回复和工具调用实时更新在同一张卡片上。
-- **全局结果摘要**：所有 profile 的流式任务成功结束后，都会额外发送一条独立、限长的纯文字结果摘要；纯文本回复模式不会重复发送。
-- **会话延续**：每个聊天、话题或文档评论有自己的会话，不会互相串。
-- **排队与消息合并**：短时间连续发送的消息会合并处理；任务运行中收到的普通消息会排队到下一轮，`/new`、`/cd`、`/ws use`、`/stop` 这类命令可以中断当前任务。
-- **多工作空间**：用 `/cd` 切换当前项目，用 `/ws` 保存和复用常用项目目录。
-- **图片 / 文件**：直接发给 bot，bridge 下载到本地后交给本机 agent 处理。
-- **卡片按钮**：`/help`、`/ws list`、`/status` 返回可点击的交互卡片。
+- 把飞书 / Lark 消息转发给本地 ZCode CLI。私聊直接发，群里 `@bot` 即可。
+- **流式卡片**：回复在一张卡片上实时更新，每次运行结束再补一条有长度上限的纯文本结果摘要。
+- **会话连续**：每个私聊、话题、文档评论线程各自维护独立的 ZCode session（`--resume sess_<id>`）。
+- **排队与合批**：连发的消息合并处理；运行中发来的消息排队到下一轮，`/new`、`/cd`、`/stop` 等命令可打断当前任务。
+- **多工作区**：`/cd` 切换当前项目，`/ws` 保存和复用常用目录。
+- **图片和文件**：直接发给 bot，bridge 下载到本地后通过 `--attach` 传给 ZCode。
+- **交互卡片**：`/help`、`/ws list`、`/status` 返回可点击按钮的卡片。
 
 ## 前置条件
 
 - Node.js **>= 20.12.0**
-- 本机至少安装一个 agent，并按对应说明完成授权：
-  - Claude Code：`claude`，安装说明：https://docs.anthropic.com/en/docs/claude-code/quickstart
-  - Codex CLI：`codex`，安装说明：https://developers.openai.com/codex/cli
-  - Kimi Code CLI：`kimi`，安装说明：https://moonshotai.github.io/kimi-code/。不要用全局 `kimi login` 给 bridge bot 授权；创建 profile 后按下方命令登录隔离 profile。
-- 一个飞书 / Lark PersonalAgent 应用。首次启动的扫码向导可以帮你创建并绑定。
+- macOS 已安装 **ZCode 桌面版**。bridge 驱动的是应用内置运行时 `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`；非标准安装路径用 `LARK_ZCODE_BRIDGE_RUNTIME_PATH` 覆盖。
+- **GLM Coding Plan** API Key（BigModel 或 z.ai）。
+- 一个飞书 / Lark **PersonalAgent** 应用。首次运行的扫码向导可以帮你创建并绑定。
 
 ## 安装
 
 ```bash
-npm i -g lark-channel-bridge
+npm i -g lark-zcode-bridge
 # 或
-pnpm add -g lark-channel-bridge
+pnpm add -g lark-zcode-bridge
 ```
 
-## 首次启动
+## 首次运行
 
 ```bash
-lark-channel-bridge run
+lark-zcode-bridge run
 ```
 
-第一次运行会进入扫码向导：
+向导会引导你扫码创建/绑定 PersonalAgent 应用，随后以前台方式启动 bridge。要让它常驻（重启后自动拉起），用 `lark-zcode-bridge start` 安装 per-profile service（macOS 上走 launchd）；`lark-zcode-bridge stop` / `restart` 管理服务。
 
-1. 终端渲染二维码。
-2. 用飞书 App 扫码。
-3. 选择或创建 PersonalAgent 应用。
-4. 如果终端提示，选择本次要初始化的 agent。
-5. 成功后配置写入 `~/.lark-channel/config.json`。
+### 配置模型 API Key
 
-没有指定项目目录也可以启动。bridge 会创建一个 profile 托管的默认工作目录；启动后在飞书里发送 `/cd <path>` 切到实际项目。
-
-如果已经有 PersonalAgent app，可以在初始化时传 `--app-id` 跳过创建应用流程；命令会提示输入 App Secret。
+每个 profile 都有**独立的 ZCode home**（`~/.lark-zcode-bridge/profiles/<name>/zcode-home`）——bridge 不会读写你真实的 `~/.zcode`。每个 profile 填一次 Key：
 
 ```bash
-lark-channel-bridge run --app-id cli_xxx
-# 或直接初始化并启动后台服务
-lark-channel-bridge start --app-id cli_xxx
+lark-zcode-bridge profile login zcode      # 交互式输入 API Key
+# 或非交互：
+ZCODE_API_KEY=<key> lark-zcode-bridge profile login zcode
 ```
 
-Lark 国际版应用可加 `--tenant lark`。
+生成的模型配置默认走 BigModel Coding Plan（主模型 `glm-5.2`，轻量模型 `glm-5-turbo`）。聊天里用 `/model glm-5-turbo` 切换主模型；要自定义 provider、z.ai baseURL 等，直接编辑 `zcode-home/.zcode/cli/config.json`。
 
-## 后台运行
+## 权限
 
-`run` 适合首次配置和前台调试。确认 bot 能正常收发消息后，先用 `Ctrl-C` 停掉前台进程，再用系统服务常驻后台：
+新建 ZCode profile 默认是**完整权限**：每次运行带 `--mode yolo`，agent 可以读写任意目录、免逐条审批执行命令——不受所选工作区限制。这与上游 bridge 的 `bypassPermissions` 姿态一致，对个人 bot 是有意为之：bridge 自己的访问控制（`allowedUsers` / `allowedChats`）决定**谁**能用 bot。
 
-```bash
-lark-channel-bridge start
-lark-channel-bridge status
-lark-channel-bridge stop
-```
-
-服务层命令必须先全局安装，不能直接用 `npx`。daemon 的 launchd plist / systemd unit / Windows 任务会记录 bridge CLI 的路径；如果这个路径来自 npm 临时缓存，缓存清掉后 daemon 就起不来。`run` 用 `npx` 单次启动没问题。
-
-服务层命令按 profile 注册，每个 profile 有独立服务：
-
-```bash
-lark-channel-bridge start [--profile <name>]
-lark-channel-bridge stop [--profile <name>]
-lark-channel-bridge restart [--profile <name>]
-lark-channel-bridge status [--profile <name>]
-lark-channel-bridge unregister [--profile <name>]
-```
-
-平台映射：
-- **macOS**：launchd 用户代理 `ai.lark-channel-bridge.bot.<profile>`
-- **Linux**：systemd 用户单元 `lark-channel-bridge.bot.<profile>.service`
-- **Windows**：Task Scheduler 任务 `LarkChannelBridge.Bot.<profile>`，launcher 是 `.cmd`
-
-daemon 日志在 `~/.lark-channel/profiles/<profile>/logs/daemon/`。
-
-### 多 profile：分别运行 Claude、Codex 和 Kimi
-
-默认情况下，bridge 使用当前激活的 profile；可以通过 `profile use <name>` 切换。每个 profile 会维护独立的应用凭据、会话、工作目录和日志。只有在需要同时连接多个 PersonalAgent 应用，或分别运行 Claude、Codex 和 Kimi 时，才需要创建多个 profile：
-
-```bash
-lark-channel-bridge profile create kimi --agent kimi --workspace /path/to/a/narrow/project
-lark-channel-bridge profile login kimi
-lark-channel-bridge start --profile kimi
-```
-
-`profile login kimi` 会把 Kimi 凭据保存在 `~/.lark-channel/profiles/kimi/kimi-home`；普通的全局 `kimi login` 不会给这个隔离 bot profile 授权。Claude、Codex profile 仍可按原方式创建和启动。
-
-Kimi 适配器通过 `kimi acp` 接入，目前是仅支持 macOS、仅支持纯文本的受限试点，并严格锁定 Kimi Code **0.29.2**；其它版本会 fail closed。新建 Kimi profile 默认仍是只读模式。在该模式下，每次 bot ACP 运行及其运行前 Kimi 配置校验都会进入 macOS Seatbelt；Kimi 子进程不能直接读取工作区正文，文本读取必须经过 bridge 的 ACP 反向接口，并校验 realpath 范围、敏感路径、普通 UTF-8 文件和 1 MiB 上限。bridge 只允许按已知路径 `Read` 和检查元数据，不能列目录，也不支持 Glob/Grep；同时强制 `default/manual` 会话模式并拒绝审批，禁用写入、进程执行、附件、MCP、子 Agent、Skill、hook 和 plugin。只读边界由工具拒绝规则、ACP 反向文件接口和 Seatbelt 独立执行，不依赖会话模式。发现 `AGENTS.md`、MCP 配置、Kimi 本地配置或项目 Skill 目录等隐式扩展入口时也会拒绝启动。只读模式在缺少 macOS Seatbelt 时会 fail closed。Kimi 的 `workspace` 模式保留 Seatbelt，允许本机 Shell/进程执行，并将项目数据的读写限制在当前激活工作目录内。额外读取例外只有 Apple `system.sb` 运行基线、Kimi 安装目录和隔离的 profile home；其中只有隔离 profile home 也可写。只有将 Kimi 的两个权限值都显式设为 `full`，才会不启用 Seatbelt，并开放本机 Shell 与文件读取、写入和编辑工具。full 模式拥有 bridge 操作系统用户的权限，不受所选工作区限制：prompt 可以执行任意命令，也可以读取、修改、删除或泄露该用户可访问的任何本机文件或凭据。只应在独立、可信的 profile 和操作系统账号中使用。Kimi 暂不处理云文档评论。Kimi 的思考内容不会外发；普通回答最多缓冲 20 KB，并在单轮结束后统一做路径脱敏再进入卡片，因此试点期间不会逐 chunk 流式展示 Kimi 回答正文。Read 工具面板只展示有界的路径/行号摘要和完成状态，不会展示原始文件输出。面向团队使用时，应给 Kimi 创建独立的 PersonalAgent 应用和 profile，不要复用 Claude 或 Codex bot 的应用凭据。
-
-例如只重启 Codex bot：
-
-```bash
-lark-channel-bridge restart --profile codex
-lark-channel-bridge status --profile codex
-```
-
-## 命令速查
-
-### 宿主 CLI
-
-```text
-lark-channel-bridge run [--profile <name>] [--agent claude|codex|kimi] [--workspace <path>] [-c <config>]
-lark-channel-bridge migrate [--profile <name>] [--agent claude|codex|kimi]
-lark-channel-bridge ps
-lark-channel-bridge kill <id|#>
-lark-channel-bridge --help
-```
-
-`profile use <name>` 会切换后续默认启动使用的 profile。需要同时跑 Claude / Codex / Kimi 多个 bot、连接多套 PersonalAgent 应用，或做脚本化部署时，再使用这些 profile 管理命令：
-
-```bash
-lark-channel-bridge profile create claude --agent claude
-lark-channel-bridge profile create codex --agent codex
-lark-channel-bridge profile create kimi --agent kimi
-lark-channel-bridge profile login kimi
-lark-channel-bridge profile list
-lark-channel-bridge profile use <name>
-lark-channel-bridge profile remove <name>
-lark-channel-bridge profile remove <name> --purge --yes
-lark-channel-bridge profile export <name> [--output ./profile.json] [--force]
-lark-channel-bridge profile export <name> --include-secrets --yes
-```
-
-`profile remove` 默认归档本地状态，也可以删除当前激活的 profile。若还剩其他 profile，会自动切到下一个；若这是最后一个 profile，会清空 root config，之后可以用同名重新创建。只有加 `--purge --yes` 才会永久删除。`profile export` 默认脱敏 app secret；只有加 `--include-secrets --yes` 才会导出敏感配置。
-
-如果某个 profile 被建成了错误的 agent 类型，先 `stop` 或 `unregister --profile <name>` 清理对应后台服务，再 `profile remove <name>`，然后用正确的 `--agent` 重新创建。
-
-### 飞书内斜杠命令
-
-| 命令 | 作用 |
-|---|---|
-| `/new`, `/reset` | 清空当前会话 |
-| `/cd <path>` | 切换工作目录并重置会话 |
-| `/ws list` | 列出命名工作空间 |
-| `/ws save <name>` | 把当前工作目录保存为命名工作空间 |
-| `/ws use <name>` | 切换到命名工作空间 |
-| `/ws remove <name>` | 删除命名工作空间 |
-| `/resume` | 恢复同 agent、工作目录、权限模式兼容的历史会话 |
-| `/status` | 查看 profile、agent、工作目录、会话、lark-cli 身份和运行状态 |
-| `/config` | 调整展示偏好、访问控制和 lark-cli 身份策略 |
-| `/invite user @某人` | 允许用户私聊使用 bot |
-| `/invite admin @某人` | 添加访问控制管理员 |
-| `/invite group` | 允许当前群使用 bot |
-| `/invite all group` | 允许 bot 所在的所有群使用（Kimi profile 禁用） |
-| `/remove user @某人`, `/remove admin @某人`, `/remove group` | 移除访问控制条目 |
-| `/stop` | 停止当前 run，也可点卡片停止按钮 |
-| `/timeout [N\|off\|default]` | 设置或清除当前会话的 idle watchdog |
-| `/ps` | 列出本机 bridge 进程 |
-| `/exit <id\|#>` | 停止指定 bridge 进程 |
-| `/reconnect` | 强制 WebSocket 重连 |
-| `/doctor [描述]` | 执行低敏诊断 |
-| `/help` | 帮助卡片 |
-
-私聊不需要 @。群和话题群默认必须 `@bot`；`@all` 会被忽略。支持的云文档评论里 @bot 就会触发回复。
-
-## lark-cli 身份策略
-
-每个 profile 都使用当前 profile 的 lark-cli 目录：`~/.lark-channel/profiles/<profile>/lark-cli`。agent 子进程会收到指向这个目录的 `LARKSUITE_CLI_CONFIG_DIR`，所以一个 profile 里的个人授权不会共享给另一个 profile。
-
-默认策略是 `bot-only`：lark-cli 使用应用 / bot 身份，不访问个人资源。当用户为了日历、邮箱、云盘等个人资源完成授权后，当前 profile 可以切到 `user-default`，保留应用身份，同时允许已授权的用户身份。owner/admin 可以在 `/config` 查看或切换这个策略；`/status` 会用 `lark-cli: app` 或 `lark-cli: user-ready` 展示当前摘要。
-
-## 工作目录
-
-每个 profile 都可以有一个默认工作目录：`workspaces.default`。新建 profile 时可以传 `--workspace <path>` 作为初始目录；没传时 bridge 会创建一个 profile 托管的默认工作目录。Kimi profile 还可以通过 `workspaces.allowedRoots` 配置多个可选根目录；默认目录始终是隐式授权根。
-
-下面只是 profile 里的字段片段，不要整段覆盖 `config.json`；请改对应 profile 下的 `workspaces` 字段。
+要降低上限，编辑 profile 配置（`~/.lark-zcode-bridge/config.json`）：
 
 ```json
 {
-  "workspaces": {
-    "default": "/Users/me/Kimi Code",
-    "allowedRoots": [
-      "/Users/me/Kimi Projects/client-a",
-      "/Volumes/Work/Kimi Projects/client-b"
-    ]
-  }
-}
-```
-
-bridge 会检查每个授权根和所选目录存在、是目录、realpath 落在授权根内，并且不是 `/`、Home 根、系统目录或临时目录根这类范围过大的位置。对 Kimi 来说，`/cd` 和 `/ws use` 可以选择默认根、额外授权根或其子目录，但单次运行只会拿到当前选中的一个规范化工作目录。新增根目录必须在本机修改 profile 并重启该 profile 服务，群聊命令不能扩大白名单。对未启用沙箱的权限模式而言，工作目录本身并不是文件系统 sandbox；agent 实际能访问哪些文件仍取决于本机 agent 进程及其权限模式。
-
-## 权限模式
-
-推荐给用户配置的是 `permissions.defaultAccess` 和 `permissions.maxAccess`。新的 Claude 和 Codex profile 默认两项都是 `full`，以保持 bridge 的本地工具、授权流程、文件写入等能力完整可用。新的 Kimi profile 仍会把两项默认为 `read-only`，保留 Seatbelt 和 ACP 受控读取边界。Kimi 的 `workspace` 保留 Seatbelt，同时允许本机 Shell/进程执行和当前激活工作目录内的项目数据读取、写入、编辑，并受上述少量运行例外约束。只有将 Kimi 的两项都显式设为 `full`，才会在无 Seatbelt 时开启这些本地工具。如需收紧 Claude 或 Codex 权限，可以改成 `workspace` 或 `read-only`；收紧后本地工具执行、登录 / 授权流程、文件写入等能力可能受限。
-
-下面只是 profile 里的字段片段，不要整段覆盖 `config.json`；请改对应 profile 下的 `permissions` 字段。
-
-```json
-{
-  "permissions": {
-    "defaultAccess": "full",
-    "maxAccess": "full"
-  }
-}
-```
-
-模式映射：
-
-| Bridge access | Claude permission mode | Codex mode | Kimi ACP mode |
-|---|---|---|---|
-| `full` | `bypassPermissions` | `danger-full-access` | 无 Seatbelt；以本机用户权限开放 Shell 和文件读写/编辑 |
-| `workspace` | `acceptEdits` | `workspace-write` | Seatbelt；开放本机 Shell/进程执行，项目数据读写/编辑限当前激活 cwd |
-| `read-only` | `plan` | `read-only` | Seatbelt + ACP 只读；强制 `default/manual`；拒绝审批 |
-
-对 Kimi 而言，`full` 是显式的高风险选择：配置的工作区只是进程工作目录，不是文件系统边界。进程可执行任意本机命令，并访问 bridge 操作系统用户能访问的任何内容。建议使用独立的操作系统账号和 profile；除非能接受该暴露面，否则保持 `read-only`。附件仍会在下载前被拒绝，也不会写进 prompt。
-
-旧版 `sandbox` 字段仍可读取。bridge 保存 profile 后，会把该设置迁移为 canonical `permissions`。
-
-## 数据目录
-
-| 路径 | 内容 |
-|---|---|
-| `~/.lark-channel/config.json` | root config，包含 profiles 和 active profile |
-| `~/.lark-channel/active-profile` | 最近选择的 profile |
-| `~/.lark-channel/profiles/<profile>/sessions.json` | 会话状态 |
-| `~/.lark-channel/profiles/<profile>/sessions.json.catalog.json` | agent-aware 会话索引 |
-| `~/.lark-channel/profiles/<profile>/workspaces.json` | 当前和命名工作空间绑定 |
-| `~/.lark-channel/profiles/<profile>/secrets.enc` | profile 本地加密 secret |
-| `~/.lark-channel/profiles/<profile>/lark-cli/` | 当前 profile 的 lark-cli 目录 |
-| `~/.lark-channel/profiles/<profile>/media/` | 附件缓存 |
-| `~/.lark-channel/profiles/<profile>/logs/` | 结构化运行日志 |
-| `~/.lark-channel/registry/processes.json` | 本机进程注册表 |
-| `~/.lark-channel/registry/locks/` | profile lock 和 app lock |
-
-设置 `LARK_CHANNEL_HOME=/path/to/state` 可以迁移整棵本地状态目录。`LARK_CHANNEL_LOG_DAYS` 可以调整日志保留天数。
-
-## 访问控制
-
-**聊天访问默认是私有的：开箱即用时，只有"你"能在私聊和群聊里用这个 bot。** 这里的"你" = 创建 / 拥有这个飞书应用的人（也就是扫码把 bot 建起来的那位）。bot 会自动从飞书查出谁是应用 owner，所以**一个人用聊天入口完全不用配置**——你私聊它、在任意群里 @它都正常工作，其他人的聊天消息会被静默忽略（bot 不会回"你没权限"，免得暴露自己的存在）。云文档评论按文档权限生效，见下文。
-
-想让别的同事或某些群也能用，就把他们加进下面三类名单：
-
-| 名单 | 控制谁 | 加入 | 移除 |
-|------|--------|------|------|
-| **允许私聊的用户** | 谁可以私聊 bot | `/invite user @某人` | `/remove user @某人` |
-| **响应的群** | bot 在哪些群里对**群内所有人**响应 | `/invite group`（当前群）/ `/invite all group`（bot 所在的全部群） | `/remove group`（当前群） |
-| **管理员** | 谁能改设置、并能在任意群用 bot | `/invite admin @某人` | `/remove admin @某人` |
-
-> `/invite`、`/remove` 这些命令只有**你（创建者）和管理员**能发。命令里 @ 的是**对方**（不是 @ bot），bot 会自动把 @ 解析成对应的人，你不用手动去找 ID。
-
-### 两种"畅通无阻"的身份
-
-- **你（创建者）**：不受任何名单限制——私聊、任意群、所有命令都能用，而且**永远锁不死自己**：哪怕名单配乱了，回到 bot 私聊发 `/config` 总能进来。在飞书后台把应用 owner 转给别人后，bot 也会自动跟着切换。
-- **管理员**：能私聊、能用 `/config` 等管理命令，而且**不受"响应的群"名单限制**——无论群在不在名单里，bot 都会回他们。适合给一起维护 bot 的同事。
-
-### 几种常见配置
-
-- **只给自己用** → 什么都不用做，默认就是。
-- **让某个同事能私聊 bot** → `/invite user @他`
-- **让某个工作群里所有人都能用** → 在那个群里发 `/invite group`
-- **第一次配置 Claude/Codex，想把 bot 已经在的群一次性全开放** → 发 `/invite all group` 一键拉取 bot 所在的全部群加入名单，之后再用 `/remove group` 删掉不想要的。Kimi profile 会拒绝该命令。
-- **再拉个人一起当管理员** → `/invite admin @他`
-
-### 还需要知道的
-
-- 改完**下一条消息**就生效，不用重启。
-- **群里默认要先 @bot 才会回**（私聊不用 @）。这是另一个独立开关（`/config` →"群里需要 @ bot"），和上面的名单是两回事。
-- 陌生人发消息一律静默丢弃，不会有任何回复。唯一的例外：有人在一个还没开放的群里 @bot，bot 会回一句友好提示，告诉他可以让管理员发 `/invite group` 开放这个群。
-- 云文档评论按文档权限生效：能在支持的文档里评论并 @bot 的人可以触发回复。
-
-### Kimi 群聊试点建议
-
-Kimi 目前只建议在指定群或话题群中试点。用 `/invite group` 逐个开放群，保留“群里需要 @ bot”，并使用一份独立、脱敏、只包含获准向该试点群全员公开内容的工作区副本；不要直接指向宽范围生产仓库。Kimi profile 会对 `/invite all group` fail closed。群一旦加入 `allowedChats`，群内所有成员都会通过同一个本地服务账号触发 bot；bridge 当前不会额外校验租户成员身份、源码级数据权限，也没有逐用户配额。话题群按 thread 隔离会话，普通群则共享 chat 级会话，因此多人并发试点优先使用话题群。
-
-试点期间应保持低并发：Kimi 每轮 ACP 运行前会同步校验配置，校验期间可能暂停 bot 事件循环。控制台或遥测 instrumentation 必须在启动 Kimi profile 前安装；活跃 Kimi 运行期间不要热加载或热重载会替换 `console.error` 的 instrumentation，修改后应重启该 profile。
-
-### 高级：直接改配置文件
-
-不想在飞书里点的话，`/invite`、`/config` 背后写的是 `~/.lark-channel/config.json` 中对应 profile 的 `access` 字段。空白名单表示这个名单没人，不表示所有人都能用。下面只是 profile 里的字段片段，不要整段覆盖 `config.json`：
-
-```json
-{
-  "schemaVersion": 2,
   "profiles": {
-    "claude": {
-      "agentKind": "claude",
-      "access": {
-        "allowedUsers": ["ou_xxxxxxxxxxxxx"],
-        "allowedChats": ["oc_xxxxxxxxxxxxx"],
-        "admins": ["ou_xxxxxxxxxxxxx"],
-        "requireMentionInGroup": true
+    "zcode": {
+      "permissions": {
+        "defaultAccess": "full",
+        "maxAccess": "full"
       }
     }
   }
 }
 ```
 
-`allowedUsers` / `admins` 填用户 `open_id`，`allowedChats` 填群 `chat_id`。手动找 ID 最简单的办法：让对方给 bot 发条消息（群里就 @ 它一下），然后看当前 profile 的日志：
+两个值都改成 `"workspace"` 即 `--mode build`（工作区读写），改成 `"read-only"` 即 `--mode plan`（只读规划）。旧版 `sandbox` 字段由 `permissions` 推导，不要直接配置。
+
+## 访问控制
+
+默认只有 owner 能用。owner 可以在聊天里开放：
+
+- `/invite user @某人` — 加入用户白名单；`/remove user @某人` — 移出
+- `/invite group` — 把当前群加入响应群名单；`/remove group` — 移出
+- `/invite all group` — 把 bot 所在的所有群一键加入
+
+群聊命令不能扩大白名单（只有 owner 的 `/invite` 生效），重启后以配置文件为准。云文档评论按文档权限生效：任何能在文档里评论并 @ 到 bot 的人都能触发运行，分享文档时注意。
+
+## 工作区
+
+单次运行只会拿到当前选中的一个规范化工作目录。`/cd <路径>` 切换；`/ws save|use|list|remove` 管理常用目录。profile 的兜底目录是配置里的 `workspaces.default`（首次运行自动建在 `~/.lark-zcode-bridge-workspaces/<profile>/default`）。
+
+## 多 profile
+
+多个 bot 应用可以作为命名 profile 并行运行，各自有独立的配置、会话、密钥和常驻服务：
+
+- `lark-zcode-bridge profile list|create|use <name>` — 管理 profile
+- `lark-zcode-bridge profile export <name>` — 导出 profile；`--include-secrets --yes` 会连应用密钥和 secret provider 配置一起导出（导出文件按密钥对待）
+- `lark-zcode-bridge profile remove <name>` — 归档 profile 状态；`--purge --yes` 彻底删除
+
+### lark-cli 身份策略
+
+bridge 会为每个 profile 投影一个当前 profile 的 lark-cli 目录（`profiles/<name>/lark-cli/`），让 agent 运行时可以以 bot 自己的身份回调飞书。lark-cli 身份策略（strict-mode / default-as）只作用在这个目录里，绝不碰用户个人的 lark-cli 配置。
+
+## 聊天内命令
+
+- `/new` — 开新会话
+- `/cd <路径>` — 切换工作区；`/ws list|use|save` — 管理已存工作区
+- `/status` — 查看当前会话、目录、权限模式
+- `/model <id>` — 切换本 profile 的主模型
+- `/resume` — 恢复当前 catalog 记录的会话
+- `/stop` — 打断正在运行的任务
+- `/help` — 完整命令卡片
+
+## 配置目录
+
+所有状态存放在 `~/.lark-zcode-bridge/`（可用 `LARK_ZCODE_BRIDGE_HOME` 覆盖）。特意与 `lark-channel-bridge` 的 `~/.lark-channel/` 分开，两个 bridge 可以并行运行、互不覆盖配置。
+
+## 开发
 
 ```bash
-grep '"event":"enter"' ~/.lark-channel/profiles/<profile>/logs/bridge-$(date +%Y%m%d).jsonl | tail -5
+pnpm install
+pnpm typecheck   # tsc --noEmit
+pnpm test        # vitest：unit + integration + process
+pnpm build       # tsup → dist/
 ```
 
-每行都带 `chatId`（群 / 私聊 ID）和 `senderId`（用户 `open_id`）。手改完后**重启 bridge**，或在允许的 admin 上下文里发 `/reconnect` 让它生效。日常调整还是 `/invite` / `/config` 更省事，直接改文件主要用于部署脚本预填。
+## 致谢
 
-## 云文档评论
+基于 zarazhangrui 及贡献者的 [lark-channel-bridge](https://github.com/zarazhangrui/feishu-claude-code-bridge)（MIT）构建；同样参考了姊妹 fork lark-kimi-bridge 对 Kimi Code CLI 的单 agent 改造。
 
-云文档评论不再需要单独绑定工作目录或维护文档白名单。支持的文档评论里 @bot 后，bridge 会在同一个评论线程里回复。评论运行复用文档级 session key；没有记录过文档 cwd 时回退到用户 home 目录。Kimi ACP 试点暂不处理云文档评论。
+## License
 
-## 常见问题
-
-**bot 没反应 / agent 不回复**：通常是本机 `claude`、`codex` 或 `kimi` CLI 没登录，或者当前会话指向了不存在的工作目录。发 `/status` 看当前状态；`/new` 重开会话往往就好。
-
-**agent 子进程假死（卡片停在最后一帧不动）**：默认启用 20 分钟 idle 探活。agent 在该窗口内没有任何事件，运行会被停止，卡片末尾会标出自动终止原因；工具调用同样受保护，缺失的 `tool_result` 不会再让探活永久暂停。可用 `/config` 修改全局值、`/timeout N` 覆盖当前会话；确需长时间静默时用 `/timeout off`，`/timeout default` 可清除会话覆盖。
-
-**图片发过去 agent 说看不到**：升级到最新版，0.1.0 之前的版本有文件名去重 bug。
-
-## 测试与 CI
-
-本地检查：
-
-```bash
-pnpm test
-pnpm typecheck
-pnpm build
-```
-
-`pnpm test` 包含 unit、integration 和 process-level adapter 测试。CI 在 macOS、Ubuntu、Windows 上执行 `pnpm install --frozen-lockfile`、`pnpm test`、`pnpm typecheck` 和 `pnpm build`。
-
-## 可选：遥测（Telemetry）
-
-默认情况下 bridge **不上报任何数据**：没有指标、没有日志离开你的机器，也不引入任何遥测依赖。下面这个钩子在你主动开启前完全是空操作。
-
-想接自己的监控时，用环境变量指向一个 default export（或导出 `createAdapter`）`AdapterFactory` 的模块：
-
-```bash
-LARK_CHANNEL_TELEMETRY_MODULE=your-telemetry-package lark-channel-bridge start
-```
-
-该模块会收到每一条 `log.*` 事件，以及错误 / 指标钩子，转发到任何你想要的地方。接口从包根导出：
-
-```ts
-import type { AdapterFactory, TelemetryAdapter, TelemetryEvent } from 'lark-channel-bridge';
-
-const createAdapter: AdapterFactory = (meta) => ({
-  emit(event) {/* 上报事件 */},
-  recordError(err, ctx) {/* 上报异常 */},
-  recordMetric(name, value, tags) {/* 上报指标 */},
-  flush(timeoutMs) {/* 冲刷缓冲事件 */},
-});
-export default createAdapter;
-```
-
-模块不存在、工厂函数不合法、或者 adapter 抛错，都会降级为空操作——遥测永远不会阻止 bridge 启动，也不会打断日志。
-
-## 许可
-
-[MIT](./LICENSE)
-
-<img src="./assets/feedback-group-qr.png" alt="飞书反馈群二维码" width="360">
+MIT — 见 [LICENSE](./LICENSE)。

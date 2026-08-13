@@ -148,7 +148,7 @@ async function assertLockNotHeldByAnotherRuntime(
     if (!opts.confirmStopRuntimeLockProcess && (!process.stdin.isTTY || !process.stdout.isTTY)) {
       console.error(
         `  非交互模式无法确认停止 ${kind === 'profile' ? 'profile' : 'app'} 占用进程。` +
-          '请先用 `lark-channel-bridge ps` 查看并用 `lark-channel-bridge kill <bot id>` 停止后重试。',
+          '请先用 `lark-zcode-bridge ps` 查看并用 `lark-zcode-bridge kill <bot id>` 停止后重试。',
       );
       process.exit(1);
     }
@@ -186,7 +186,7 @@ async function confirmStopRuntimeLockProcess(): Promise<boolean> {
 }
 
 /**
- * Poll `~/.lark-channel/processes.json` for a freshly-registered bridge
+ * Poll `~/.lark-zcode-bridge/processes.json` for a freshly-registered bridge
  * instance whose appId matches our config and whose `botName` is filled —
  * the latter only happens AFTER the WS handshake to Feishu succeeds, so
  * by the time we see it the daemon is genuinely online.
@@ -420,7 +420,7 @@ export async function runServiceStatus(opts: ServiceProfileOptions = {}): Promis
  * `bridge unregister` — stop, disable autostart, and remove the service
  * definition file.
  *
- * Idempotent. Leaves ~/.lark-channel/ state untouched (keystore, sessions,
+ * Idempotent. Leaves ~/.lark-zcode-bridge/ state untouched (keystore, sessions,
  * logs etc) — that's the user's data, not service-manager hooks.
  */
 export async function runServiceUnregister(opts: ServiceProfileOptions = {}): Promise<void> {
@@ -468,8 +468,6 @@ async function maybeResolveProfileRuntime(
   }
 }
 
-function agentDisplay(agentKind: ProcessEntry['agentKind']): { id: string; displayName: string } {
-  if (agentKind === 'codex') return { id: 'codex', displayName: 'Codex CLI' };
-  if (agentKind === 'kimi') return { id: 'kimi', displayName: 'Kimi Code CLI' };
-  return { id: 'claude', displayName: 'Claude Code' };
+function agentDisplay(_agentKind: ProcessEntry['agentKind']): { id: string; displayName: string } {
+  return { id: 'zcode', displayName: 'ZCode CLI' };
 }

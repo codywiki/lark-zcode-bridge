@@ -91,7 +91,7 @@ describe('policy fingerprint', () => {
 
   it('sorts access and resource allowlists so ordering does not change digests', () => {
     const profile = createDefaultProfileConfig({
-      agentKind: 'claude',
+      agentKind: 'zcode',
       accounts: {
         app: {
           id: 'cli_test',
@@ -99,6 +99,7 @@ describe('policy fingerprint', () => {
           tenant: 'feishu',
         },
       },
+      zcode: { runtimePath: '/opt/zcode/zcode.cjs' },
       access: {
         allowedUsers: ['ou_b', 'ou_a'],
         allowedChats: ['oc_b', 'oc_a'],

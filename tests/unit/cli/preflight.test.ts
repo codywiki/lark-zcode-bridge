@@ -1224,9 +1224,9 @@ describe('lark-cli preflight', () => {
 
 async function writeRootConfig(configPath: string, profile: string): Promise<RootConfig['profiles'][string]> {
   const profileConfig = createDefaultProfileConfig({
-    agentKind: 'codex',
+    agentKind: 'zcode',
     accounts: bridgeConfig.accounts,
-    codex: { binaryPath: 'codex' },
+    zcode: { runtimePath: '/opt/zcode/zcode.cjs' },
   });
   const rootConfig: RootConfig = {
     schemaVersion: 2,

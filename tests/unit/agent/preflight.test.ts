@@ -25,18 +25,18 @@ describe('agent preflight diagnostics', () => {
 
     await expect(
       checkAgentVersion({
-        agentId: 'codex',
-        agentName: 'Codex CLI',
-        command: 'codex',
-        binaryPath: '/virtual/codex',
+        agentId: 'zcode',
+        agentName: 'ZCode CLI',
+        command: 'zcode',
+        binaryPath: '/virtual/zcode',
       }),
     ).rejects.toMatchObject({
       diagnostic: {
         code: 'agent-version-check-signaled',
-        agentId: 'codex',
-        agentName: 'Codex CLI',
-        command: 'codex',
-        binaryPath: '/virtual/codex',
+        agentId: 'zcode',
+        agentName: 'ZCode CLI',
+        command: 'zcode',
+        binaryPath: '/virtual/zcode',
         args: ['--version'],
         exitCode: null,
         signal: 'SIGTERM',
@@ -47,10 +47,10 @@ describe('agent preflight diagnostics', () => {
   it('renders a concise user-facing message for signaled version checks', () => {
     const err = new AgentPreflightError({
       code: 'agent-version-check-signaled',
-      agentId: 'codex',
-      agentName: 'Codex CLI',
-      command: 'codex',
-      binaryPath: '/opt/homebrew/bin/codex',
+      agentId: 'zcode',
+      agentName: 'ZCode CLI',
+      command: 'zcode',
+      binaryPath: '/opt/homebrew/bin/zcode',
       args: ['--version'],
       exitCode: null,
       signal: 'SIGKILL',
@@ -58,12 +58,12 @@ describe('agent preflight diagnostics', () => {
 
     expect(formatAgentPreflightError(err)).toBe(
       [
-        '✗ 本地 Codex CLI 不可用：执行 `codex --version` 时被系统终止（SIGKILL）。',
+        '✗ 本地 ZCode CLI 不可用：执行 `zcode --version` 时被系统终止（SIGKILL）。',
         '',
         '请先在终端确认：',
-        '  codex --version',
+        '  zcode --version',
         '',
-        '修复本地 Codex CLI 后，再重新运行 bridge。',
+        '修复本地 ZCode CLI 后，再重新运行 bridge。',
         '错误码：agent-version-check-signaled',
       ].join('\n'),
     );
@@ -75,9 +75,9 @@ describe('agent preflight diagnostics', () => {
 
     await expect(
       checkAgentVersion({
-        agentId: 'codex',
-        agentName: 'Codex CLI',
-        command: 'codex',
+        agentId: 'zcode',
+        agentName: 'ZCode CLI',
+        command: 'zcode',
         binaryPath: process.execPath,
         args: ['-e', 'process.stderr.write("boom\\n"); process.exit(42);'],
       }),
@@ -91,24 +91,24 @@ describe('agent preflight diagnostics', () => {
 
     await expect(
       checkAgentVersion({
-        agentId: 'claude',
-        agentName: 'Claude Code',
-        command: 'claude',
+        agentId: 'zcode',
+        agentName: 'ZCode CLI',
+        command: 'zcode',
         binaryPath: process.execPath,
         args: ['-e', 'process.exit(0);'],
       }),
     ).rejects.toMatchObject({
       diagnostic: {
         code: 'agent-version-check-empty-output',
-        agentId: 'claude',
+        agentId: 'zcode',
       },
     });
 
     await expect(
       checkAgentVersion({
-        agentId: 'claude',
-        agentName: 'Claude Code',
-        command: 'claude',
+        agentId: 'zcode',
+        agentName: 'ZCode CLI',
+        command: 'zcode',
         binaryPath: missing,
       }),
     ).rejects.toMatchObject({
@@ -121,24 +121,24 @@ describe('agent preflight diagnostics', () => {
 
   it('renders concise messages for each diagnostic category', () => {
     const cases = [
-      ['agent-binary-not-found', '✗ 未找到本地 Codex CLI。'],
-      ['agent-binary-not-executable', '✗ 本地 Codex CLI 不可执行。'],
-      ['agent-binary-resolve-failed', '✗ 本地 Codex CLI 路径解析失败。'],
-      ['agent-binary-not-readable', '✗ 本地 Codex CLI 二进制不可读取。'],
-      ['agent-version-check-spawn-failed', '✗ 本地 Codex CLI 不可用：无法执行 `codex --version`。'],
-      ['agent-version-check-timeout', '✗ 本地 Codex CLI 不可用：`codex --version` 超时未返回。'],
-      ['agent-version-check-nonzero-exit', '✗ 本地 Codex CLI 不可用：`codex --version` 退出码为 42。'],
-      ['agent-version-check-empty-output', '✗ 本地 Codex CLI 不可用：`codex --version` 没有返回版本信息。'],
-      ['agent-version-check-unsupported-version', '✗ 本地 Codex CLI 版本不在当前安全试点允许范围内。'],
+      ['agent-binary-not-found', '✗ 未找到本地 ZCode CLI。'],
+      ['agent-binary-not-executable', '✗ 本地 ZCode CLI 不可执行。'],
+      ['agent-binary-resolve-failed', '✗ 本地 ZCode CLI 路径解析失败。'],
+      ['agent-binary-not-readable', '✗ 本地 ZCode CLI 二进制不可读取。'],
+      ['agent-version-check-spawn-failed', '✗ 本地 ZCode CLI 不可用：无法执行 `zcode --version`。'],
+      ['agent-version-check-timeout', '✗ 本地 ZCode CLI 不可用：`zcode --version` 超时未返回。'],
+      ['agent-version-check-nonzero-exit', '✗ 本地 ZCode CLI 不可用：`zcode --version` 退出码为 42。'],
+      ['agent-version-check-empty-output', '✗ 本地 ZCode CLI 不可用：`zcode --version` 没有返回版本信息。'],
+      ['agent-version-check-unsupported-version', '✗ 本地 ZCode CLI 版本不在当前安全试点允许范围内。'],
     ] as const;
 
     for (const [code, firstLine] of cases) {
       const err = new AgentPreflightError({
         code,
-        agentId: 'codex',
-        agentName: 'Codex CLI',
-        command: 'codex',
-        binaryPath: '/opt/homebrew/bin/codex',
+        agentId: 'zcode',
+        agentName: 'ZCode CLI',
+        command: 'zcode',
+        binaryPath: '/opt/homebrew/bin/zcode',
         args: ['--version'],
         exitCode: 42,
         signal: 'SIGKILL',
@@ -151,39 +151,39 @@ describe('agent preflight diagnostics', () => {
     }
   });
 
-  it('shows administrators the allowed and actual Kimi versions', () => {
+  it('shows administrators the allowed and actual ZCode versions', () => {
     const message = formatAgentPreflightError(
       new AgentPreflightError({
         code: 'agent-version-check-unsupported-version',
-        agentId: 'kimi',
-        agentName: 'Kimi Code CLI',
-        command: 'kimi',
-        binaryPath: '/private/path/kimi',
+        agentId: 'zcode',
+        agentName: 'ZCode CLI',
+        command: 'zcode',
+        binaryPath: '/private/path/zcode',
         args: ['--version'],
-        expected: '0.29.2',
-        actual: '0.30.0',
+        expected: '0.16.3',
+        actual: '0.17.0',
       }),
     );
 
-    expect(message).toContain('当前版本：0.30.0');
-    expect(message).toContain('允许版本：0.29.2');
+    expect(message).toContain('当前版本：0.17.0');
+    expect(message).toContain('允许版本：0.16.3');
     expect(message).not.toContain('/private/path');
   });
 
-  it('recognizes nested Kimi preflight diagnostics', () => {
+  it('recognizes nested ZCode preflight diagnostics', () => {
     expect(getAgentPreflightDiagnostic({
       cause: new AgentPreflightError({
         code: 'agent-binary-not-found',
-        agentId: 'kimi',
-        agentName: 'Kimi Code CLI',
-        command: 'kimi',
-        binaryPath: '/opt/kimi/bin/kimi',
+        agentId: 'zcode',
+        agentName: 'ZCode CLI',
+        command: 'zcode',
+        binaryPath: '/opt/zcode/bin/zcode',
       }),
     })).toMatchObject({
       code: 'agent-binary-not-found',
-      agentId: 'kimi',
-      agentName: 'Kimi Code CLI',
-      command: 'kimi',
+      agentId: 'zcode',
+      agentName: 'ZCode CLI',
+      command: 'zcode',
     });
   });
 });

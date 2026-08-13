@@ -252,7 +252,7 @@ async function createHarness(options: { autoCompleteAgent?: boolean } = {}): Pro
       activeRuns,
       executor,
       controls: {
-        profile: 'claude',
+        profile: 'zcode',
         profileConfig,
         botOwnerId: 'ou-owner',
         ownerRefreshState: 'ok',
@@ -268,8 +268,8 @@ async function createHarness(options: { autoCompleteAgent?: boolean } = {}): Pro
 }
 
 class BlockingAgentAdapter implements AgentAdapter {
-  readonly id = 'fake-agent';
-  readonly displayName = 'Fake Agent';
+  readonly id = 'zcode';
+  readonly displayName = 'Fake ZCode';
   readonly runOptions: AgentRunOptions[] = [];
   private releases: Array<(() => void) | undefined> = [];
   private wasStopped = false;
@@ -331,10 +331,11 @@ function activeCommentScopes(h: { activeRuns: ActiveRuns }, threadScopeId: strin
 
 function profile(defaultWorkspace: string): ProfileConfig {
   const config = createDefaultProfileConfig({
-    agentKind: 'claude',
+    agentKind: 'zcode',
     accounts: { app: { id: 'cli_test', secret: '${APP_SECRET}', tenant: 'feishu' } },
     access: { allowedUsers: ['ou-user', 'ou-bot'] },
     sandbox: { defaultMode: 'read-only', maxMode: 'workspace-write' },
+    zcode: { runtimePath: join(defaultWorkspace, 'zcode.cjs') },
   });
   config.comments = {};
   config.workspaces.default = defaultWorkspace;

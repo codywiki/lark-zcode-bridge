@@ -141,7 +141,8 @@ function makeControls(opts: {
   defaultWorkspace?: string;
 }): Controls {
   const profileConfig = createDefaultProfileConfig({
-    agentKind: 'claude',
+    agentKind: 'zcode',
+    zcode: { runtimePath: '/opt/zcode/zcode.cjs' },
     accounts: {
       app: {
         id: 'cli_test',
@@ -153,7 +154,7 @@ function makeControls(opts: {
   });
   if (opts.defaultWorkspace) profileConfig.workspaces.default = opts.defaultWorkspace;
   return {
-    profile: 'claude',
+    profile: 'zcode',
     profileConfig,
     botOwnerId: opts.owner,
     ownerRefreshState: 'ok',

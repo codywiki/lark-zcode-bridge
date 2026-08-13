@@ -1,8 +1,6 @@
 import type { AgentAvailability } from './preflight';
 import type { ClaudePermissionMode, CodexSandboxMode } from '../config/permissions';
 
-export type { ClaudePermissionMode } from '../config/permissions';
-
 export type AgentEvent =
   | { type: 'system'; sessionId?: string; threadId?: string; cwd?: string; model?: string }
   | { type: 'progress' }
@@ -27,8 +25,6 @@ export type AgentEvent =
     }
   | { type: 'error'; message: string; terminationReason: 'failed' | 'interrupted' | 'timeout' };
 
-export const CLAUDE_DEFAULT_PERMISSION_MODE: ClaudePermissionMode = 'bypassPermissions';
-
 export interface AgentRunOptions {
   runId: string;
   prompt: string;
@@ -37,15 +33,14 @@ export interface AgentRunOptions {
   threadId?: string;
   model?: string;
   reasoningEffort?: string;
-  /**
-   * Extra Codex `-c` config overrides appended verbatim (each element is the
-   * value of one `-c` flag, e.g. `agents.max_concurrent_threads_per_session=2`).
-   * Codex-only; ignored by other adapters. Used by the effort router to set the
-   * per-run sub-agent budget derived from the classified difficulty.
-   */
-  codexConfigOverrides?: readonly string[];
   images?: readonly string[];
+  /**
+   * Generic sandbox label derived from the profile's effective AccessMode by
+   * the run policy ('read-only' | 'workspace-write' | 'danger-full-access').
+   * The ZCode adapter maps it to `--mode plan|build|yolo`.
+   */
   sandbox?: CodexSandboxMode;
+  /** Legacy claude permission label kept for policy compatibility; unused by ZCode. */
   permissionMode?: ClaudePermissionMode;
   /**
    * Grace period (ms) between SIGTERM and SIGKILL when stop() is called on

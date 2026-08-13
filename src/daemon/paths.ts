@@ -8,7 +8,7 @@ import { paths } from '../config/paths';
  * unit name. Single-instance for now; if we ever support multiple bots
  * per machine the suffix can grow `.{appid}` without breaking installs.
  */
-export const SERVICE_NAME = 'lark-channel-bridge.bot';
+export const SERVICE_NAME = 'lark-zcode-bridge.bot';
 
 export function serviceProfileId(profile: string): string {
   const trimmed = profile.trim();
@@ -83,7 +83,7 @@ export function windowsLauncherCmdPath(profile: string = paths.profile): string 
 
 /**
  * Daemon stdout/stderr go alongside the bridge's own structured logs in
- * `~/.lark-channel/logs/` so users only need to remember one path. Filenames
+ * `~/.lark-zcode-bridge/logs/` so users only need to remember one path. Filenames
  * are `daemon-*` to keep them distinct from the rolling per-day JSON files.
  */
 export function daemonLogDir(profile: string = paths.profile): string {

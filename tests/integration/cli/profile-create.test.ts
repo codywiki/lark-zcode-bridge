@@ -6,7 +6,6 @@ import { runProfileCreate } from '../../../src/cli/commands/profile';
 import { resolveAppPaths } from '../../../src/config/app-paths';
 import {
   createDefaultProfileConfig,
-  type AgentKind,
   type RootConfig,
 } from '../../../src/config/profile-schema';
 import { loadRootConfig } from '../../../src/config/profile-store';
@@ -15,7 +14,7 @@ import { secretKeyForApp } from '../../../src/config/schema';
 import { writeVersionExecutable } from '../../helpers/fake-executable';
 
 const auth = vi.hoisted(() => ({
-  validateAppCredentials: vi.fn(async () => ({ ok: true, botName: 'Claude Regression' })),
+  validateAppCredentials: vi.fn(async () => ({ ok: true, botName: 'ZCode Regression' })),
 }));
 
 vi.mock('../../../src/utils/feishu-auth', () => ({
@@ -34,70 +33,65 @@ describe('profile create command', () => {
     const root = await makeRoot();
     const workspace = join(root, 'workspace');
     await mkdir(workspace, { recursive: true });
-    await writeProfiles(root, 'codex-dev', ['codex-dev']);
+    await writeProfiles(root, 'zcode-dev', ['zcode-dev']);
+    const runtime = await writeVersionExecutable(root, 'zcode.cjs', 'zcode 0.16.3');
 
-    await runProfileCreate('claude-regression', {
-      rootDir: root,
-      agent: 'claude',
-      workspace,
-      appId: 'cli_claude_regression',
-      appSecret: 'manual-secret',
-      tenant: 'feishu',
+    await withRuntimePath(runtime, async () => {
+      await runProfileCreate('zcode-regression', {
+        rootDir: root,
+        agent: 'zcode',
+        workspace,
+        appId: 'cli_zcode_regression',
+        appSecret: 'manual-secret',
+        tenant: 'feishu',
+      });
     });
 
     const savedText = await readFile(join(root, 'config.json'), 'utf8');
     const saved = JSON.parse(savedText) as RootConfig;
-    const appPaths = resolveAppPaths({ rootDir: root, profile: 'claude-regression' });
-    const secret = await getSecret(secretKeyForApp('cli_claude_regression'), appPaths);
+    const appPaths = resolveAppPaths({ rootDir: root, profile: 'zcode-regression' });
+    const secret = await getSecret(secretKeyForApp('cli_zcode_regression'), appPaths);
     const workspaceRealpath = await realpath(workspace);
 
     expect(auth.validateAppCredentials).toHaveBeenCalledWith(
-      'cli_claude_regression',
+      'cli_zcode_regression',
       'manual-secret',
       'feishu',
     );
-    expect(saved.activeProfile).toBe('codex-dev');
-    await expect(readFile(join(root, 'active-profile'), 'utf8')).resolves.toBe('codex-dev\n');
-    expect(saved.profiles['codex-dev']?.agentKind).toBe('codex');
-    expect(saved.profiles['claude-regression']?.agentKind).toBe('claude');
-    expect(saved.profiles['claude-regression']?.workspaces.default).toBe(workspaceRealpath);
+    expect(saved.activeProfile).toBe('zcode-dev');
+    await expect(readFile(join(root, 'active-profile'), 'utf8')).resolves.toBe('zcode-dev\n');
+    expect(saved.profiles['zcode-dev']?.agentKind).toBe('zcode');
+    expect(saved.profiles['zcode-regression']?.agentKind).toBe('zcode');
+    expect(saved.profiles['zcode-regression']?.workspaces.default).toBe(workspaceRealpath);
     expect(savedText).not.toContain('manual-secret');
     expect(secret).toBe('manual-secret');
   });
 
-  it('creates a named Codex profile that can write inside the default workspace by default', async () => {
+  it('creates a named ZCode profile that can write inside the default workspace by default', async () => {
     const root = await makeRoot();
     const workspace = join(root, 'workspace');
     await mkdir(workspace, { recursive: true });
-    await writeProfiles(root, 'claude', ['claude']);
-    const codex = await writeVersionExecutable(root, 'codex', 'codex 1.2.3');
-    const oldCodexBin = process.env.LARK_CHANNEL_CODEX_BIN;
-    process.env.LARK_CHANNEL_CODEX_BIN = codex;
+    await writeProfiles(root, 'zcode', ['zcode']);
+    const runtime = await writeVersionExecutable(root, 'zcode.cjs', 'zcode 0.16.3');
 
-    try {
-      await runProfileCreate('codex-dev', {
+    await withRuntimePath(runtime, async () => {
+      await runProfileCreate('zcode-dev', {
         rootDir: root,
-        agent: 'codex',
+        agent: 'zcode',
         workspace,
-        appId: 'cli_codex_dev',
+        appId: 'cli_zcode_dev',
         appSecret: 'manual-secret',
         tenant: 'feishu',
       });
-    } finally {
-      if (oldCodexBin === undefined) {
-        delete process.env.LARK_CHANNEL_CODEX_BIN;
-      } else {
-        process.env.LARK_CHANNEL_CODEX_BIN = oldCodexBin;
-      }
-    }
+    });
 
     const configPath = join(root, 'config.json');
     const saved = JSON.parse(await readFile(configPath, 'utf8'));
-    expect(saved.profiles['codex-dev']?.agentKind).toBe('codex');
-    expect(saved.profiles['codex-dev']).not.toHaveProperty('sandbox');
+    expect(saved.profiles['zcode-dev']?.agentKind).toBe('zcode');
+    expect(saved.profiles['zcode-dev']).not.toHaveProperty('sandbox');
 
     const loaded = await loadRootConfig(configPath);
-    expect(loaded?.profiles['codex-dev']?.sandbox).toMatchObject({
+    expect(loaded?.profiles['zcode-dev']?.sandbox).toMatchObject({
       defaultMode: 'danger-full-access',
       maxMode: 'danger-full-access',
     });
@@ -105,71 +99,39 @@ describe('profile create command', () => {
 
   it('refuses to overwrite an existing profile', async () => {
     const root = await makeRoot();
-    await writeProfiles(root, 'claude', ['claude']);
+    await writeProfiles(root, 'zcode', ['zcode']);
+    const runtime = await writeVersionExecutable(root, 'zcode.cjs', 'zcode 0.16.3');
 
-    await expect(
-      runProfileCreate('claude', {
-        rootDir: root,
-        agent: 'claude',
-        appId: 'cli_other',
-        appSecret: 'manual-secret',
-      }),
-    ).rejects.toThrow(/profile already exists/);
-  });
-
-  it('explains how to recover when an existing profile has the wrong agent', async () => {
-    const root = await makeRoot();
-    await writeProfiles(root, 'codex', ['codex']);
-    const saved = JSON.parse(await readFile(join(root, 'config.json'), 'utf8')) as RootConfig;
-    saved.profiles.codex = createDefaultProfileConfig({
-      agentKind: 'claude',
-      accounts: {
-        app: {
-          id: 'cli_codex',
-          secret: '${APP_SECRET}',
-          tenant: 'feishu',
-        },
-      },
+    await withRuntimePath(runtime, async () => {
+      await expect(
+        runProfileCreate('zcode', {
+          rootDir: root,
+          agent: 'zcode',
+          appId: 'cli_other',
+          appSecret: 'manual-secret',
+        }),
+      ).rejects.toThrow(/profile already exists/);
     });
-    await writeFile(join(root, 'config.json'), `${JSON.stringify(saved, null, 2)}\n`, 'utf8');
-
-    let error: Error | undefined;
-    try {
-      await runProfileCreate('codex', {
-        rootDir: root,
-        agent: 'codex',
-        appId: 'cli_codex_new',
-        appSecret: 'manual-secret',
-      });
-    } catch (err) {
-      if (!(err instanceof Error)) throw err;
-      error = err;
-    }
-
-    expect(error).toBeDefined();
-    const message = error?.message ?? '';
-    expect(message).toContain('profile codex already exists with agentKind claude');
-    expect(message).toContain('profile create requested --agent codex');
-    expect(message).toContain('Profile names are labels');
-    expect(message).toContain('choose another name');
-    expect(message).toContain('remove profile codex');
   });
 
   it('creates a named profile without requiring a user workspace', async () => {
     const root = await makeRoot();
-    await writeProfiles(root, 'codex-dev', ['codex-dev']);
+    await writeProfiles(root, 'zcode-dev', ['zcode-dev']);
+    const runtime = await writeVersionExecutable(root, 'zcode.cjs', 'zcode 0.16.3');
 
-    await runProfileCreate('claude-managed', {
-      rootDir: root,
-      agent: 'claude',
-      appId: 'cli_claude_managed',
-      appSecret: 'manual-secret',
-      tenant: 'feishu',
+    await withRuntimePath(runtime, async () => {
+      await runProfileCreate('zcode-managed', {
+        rootDir: root,
+        agent: 'zcode',
+        appId: 'cli_zcode_managed',
+        appSecret: 'manual-secret',
+        tenant: 'feishu',
+      });
     });
 
     const saved = JSON.parse(await readFile(join(root, 'config.json'), 'utf8')) as RootConfig;
-    const managed = await realpath(resolveAppPaths({ rootDir: root, profile: 'claude-managed' }).defaultWorkspaceDir);
-    expect(saved.profiles['claude-managed']?.workspaces.default).toBe(managed);
+    const managed = await realpath(resolveAppPaths({ rootDir: root, profile: 'zcode-managed' }).defaultWorkspaceDir);
+    expect(saved.profiles['zcode-managed']?.workspaces.default).toBe(managed);
   });
 });
 
@@ -179,12 +141,25 @@ async function makeRoot(): Promise<string> {
   return root;
 }
 
+async function withRuntimePath(runtime: string, fn: () => Promise<void>): Promise<void> {
+  const oldRuntime = process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH;
+  process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH = runtime;
+  try {
+    await fn();
+  } finally {
+    if (oldRuntime === undefined) {
+      delete process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH;
+    } else {
+      process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH = oldRuntime;
+    }
+  }
+}
+
 async function writeProfiles(root: string, activeProfile: string, names: string[]): Promise<void> {
   const profiles: RootConfig['profiles'] = {};
   for (const name of names) {
-    const agentKind: AgentKind = name.startsWith('codex') ? 'codex' : 'claude';
     profiles[name] = createDefaultProfileConfig({
-      agentKind,
+      agentKind: 'zcode',
       accounts: {
         app: {
           id: `cli_${name.replace(/[^A-Za-z0-9]/g, '_')}`,
@@ -192,7 +167,7 @@ async function writeProfiles(root: string, activeProfile: string, names: string[
           tenant: 'feishu',
         },
       },
-      ...(agentKind === 'codex' ? { codex: { binaryPath: 'codex' } } : {}),
+      zcode: { runtimePath: join(root, 'zcode.cjs') },
     });
     await mkdir(join(root, 'profiles', name), { recursive: true });
   }

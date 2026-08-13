@@ -6,7 +6,6 @@ import { resolveAppPaths } from '../../../src/config/app-paths';
 import { clearKeystoreDerivedKeyCache, setSecret } from '../../../src/config/keystore';
 import {
   createDefaultProfileConfig,
-  type AgentKind,
   type RootConfig,
 } from '../../../src/config/profile-schema';
 import { secretKeyForApp } from '../../../src/config/schema';
@@ -39,153 +38,153 @@ afterEach(async () => {
 describe('profile retention and export', () => {
   it('ignores stale registry entries that are not protected by a runtime lock', async () => {
     const root = await makeRoot();
-    await writeProfiles(root, 'claude', ['claude', 'codex-dev']);
-    await writeRegistry(root, [processEntry({ profileName: 'codex-dev', agentKind: 'codex' })]);
+    await writeProfiles(root, 'zcode', ['zcode', 'zcode-dev']);
+    await writeRegistry(root, [processEntry({ profileName: 'zcode-dev', agentKind: 'zcode' })]);
 
-    await runProfileRemove('codex-dev', { rootDir: root });
+    await runProfileRemove('zcode-dev', { rootDir: root });
 
-    await expect(stat(join(root, 'profiles', 'codex-dev'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(stat(join(root, 'profiles', 'zcode-dev'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('refuses to remove a profile while its runtime lock is active', async () => {
     const root = await makeRoot();
-    await writeProfiles(root, 'claude', ['claude', 'codex-dev']);
-    const appPaths = resolveAppPaths({ rootDir: root, profile: 'codex-dev' });
+    await writeProfiles(root, 'zcode', ['zcode', 'zcode-dev']);
+    const appPaths = resolveAppPaths({ rootDir: root, profile: 'zcode-dev' });
 
-    await withProfileAndAppLocks(appPaths, 'cli_codex_dev', 'codex', async () => {
-      await expect(runProfileRemove('codex-dev', { rootDir: root })).rejects.toThrow(/locked|running/i);
+    await withProfileAndAppLocks(appPaths, 'cli_zcode_dev', 'zcode', async () => {
+      await expect(runProfileRemove('zcode-dev', { rootDir: root })).rejects.toThrow(/locked|running/i);
     });
 
-    await expect(stat(join(root, 'profiles', 'codex-dev'))).resolves.toBeDefined();
+    await expect(stat(join(root, 'profiles', 'zcode-dev'))).resolves.toBeDefined();
   });
 
   it('archives inactive profiles by default and preserves root config on archive failure', async () => {
     const root = await makeRoot();
-    await writeProfiles(root, 'claude', ['claude', 'codex-dev']);
+    await writeProfiles(root, 'zcode', ['zcode', 'zcode-dev']);
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-05-25T12:34:56.000Z'));
     const logs: string[] = [];
     vi.spyOn(console, 'log').mockImplementation((line: string) => logs.push(line));
 
-    await runProfileRemove('codex-dev', { rootDir: root });
+    await runProfileRemove('zcode-dev', { rootDir: root });
 
-    const archived = join(root, '.trash', 'codex-dev-20260525T123456Z');
+    const archived = join(root, '.trash', 'zcode-dev-20260525T123456Z');
     await expect(stat(archived)).resolves.toBeDefined();
-    await expect(stat(join(root, 'profiles', 'codex-dev'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(stat(join(root, 'profiles', 'zcode-dev'))).rejects.toMatchObject({ code: 'ENOENT' });
     expect(Object.keys(await readRoot(root))).toContain('profiles');
-    expect((await readRoot(root)).profiles['codex-dev']).toBeUndefined();
+    expect((await readRoot(root)).profiles['zcode-dev']).toBeUndefined();
     expect(logs.join('\n')).toContain('已归档 profile');
 
     const failRoot = await makeRoot();
-    await writeProfiles(failRoot, 'claude', ['claude', 'codex-dev']);
+    await writeProfiles(failRoot, 'zcode', ['zcode', 'zcode-dev']);
     await writeFile(join(failRoot, '.trash'), 'not a directory');
-    await expect(runProfileRemove('codex-dev', { rootDir: failRoot })).rejects.toThrow();
-    expect((await readRoot(failRoot)).profiles['codex-dev']).toBeDefined();
-    await expect(stat(join(failRoot, 'profiles', 'codex-dev'))).resolves.toBeDefined();
+    await expect(runProfileRemove('zcode-dev', { rootDir: failRoot })).rejects.toThrow();
+    expect((await readRoot(failRoot)).profiles['zcode-dev']).toBeDefined();
+    await expect(stat(join(failRoot, 'profiles', 'zcode-dev'))).resolves.toBeDefined();
   });
 
   it('archives the active profile and switches to another configured profile', async () => {
     const root = await makeRoot();
-    await writeProfiles(root, 'codex-dev', ['claude', 'codex-dev']);
+    await writeProfiles(root, 'zcode-dev', ['zcode', 'zcode-dev']);
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-05-25T12:34:56.000Z'));
 
-    await runProfileRemove('codex-dev', { rootDir: root });
+    await runProfileRemove('zcode-dev', { rootDir: root });
 
     const config = await readRoot(root);
-    expect(config.activeProfile).toBe('claude');
-    expect(config.profiles['codex-dev']).toBeUndefined();
-    await expect(readFile(join(root, 'active-profile'), 'utf8')).resolves.toBe('claude\n');
-    await expect(stat(join(root, '.trash', 'codex-dev-20260525T123456Z'))).resolves.toBeDefined();
+    expect(config.activeProfile).toBe('zcode');
+    expect(config.profiles['zcode-dev']).toBeUndefined();
+    await expect(readFile(join(root, 'active-profile'), 'utf8')).resolves.toBe('zcode\n');
+    await expect(stat(join(root, '.trash', 'zcode-dev-20260525T123456Z'))).resolves.toBeDefined();
   });
 
   it('refuses removal when active-profile points at a missing profile', async () => {
     const root = await makeRoot();
-    await writeProfiles(root, 'claude', ['claude', 'codex-dev']);
+    await writeProfiles(root, 'zcode', ['zcode', 'zcode-dev']);
     await writeFile(join(root, 'active-profile'), 'missing\n', 'utf8');
 
-    await expect(runProfileRemove('codex-dev', { rootDir: root })).rejects.toThrow(
+    await expect(runProfileRemove('zcode-dev', { rootDir: root })).rejects.toThrow(
       /active profile not found: missing/,
     );
   });
 
   it('archives the last active profile and clears root config so the name can be recreated', async () => {
     const root = await makeRoot();
-    await writeProfiles(root, 'codex', ['codex']);
-    const codex = await writeVersionExecutable(root, 'codex-bin', 'codex 1.2.3');
-    const oldCodexBin = process.env.LARK_CHANNEL_CODEX_BIN;
-    process.env.LARK_CHANNEL_CODEX_BIN = codex;
+    await writeProfiles(root, 'zcode', ['zcode']);
+    const runtime = await writeVersionExecutable(root, 'zcode.cjs', 'zcode 0.16.3');
+    const oldRuntime = process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH;
+    process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH = runtime;
 
     try {
-      await runProfileRemove('codex', { rootDir: root });
+      await runProfileRemove('zcode', { rootDir: root });
 
       await expect(stat(join(root, 'config.json'))).rejects.toMatchObject({ code: 'ENOENT' });
       await expect(stat(join(root, 'active-profile'))).rejects.toMatchObject({ code: 'ENOENT' });
-      await expect(stat(join(root, 'profiles', 'codex'))).rejects.toMatchObject({ code: 'ENOENT' });
-      await runProfileCreate('codex', {
+      await expect(stat(join(root, 'profiles', 'zcode'))).rejects.toMatchObject({ code: 'ENOENT' });
+      await runProfileCreate('zcode', {
         rootDir: root,
-        agent: 'codex',
+        agent: 'zcode',
         appId: 'cli_recreated',
         appSecret: 'manual-secret',
         tenant: 'feishu',
       });
     } finally {
-      if (oldCodexBin === undefined) {
-        delete process.env.LARK_CHANNEL_CODEX_BIN;
+      if (oldRuntime === undefined) {
+        delete process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH;
       } else {
-        process.env.LARK_CHANNEL_CODEX_BIN = oldCodexBin;
+        process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH = oldRuntime;
       }
     }
     const config = await readRoot(root);
-    expect(config.activeProfile).toBe('codex');
-    expect(config.profiles.codex?.agentKind).toBe('codex');
+    expect(config.activeProfile).toBe('zcode');
+    expect(config.profiles.zcode?.agentKind).toBe('zcode');
   });
 
   it('adds a suffix when archive names collide', async () => {
     const root = await makeRoot();
-    await writeProfiles(root, 'claude', ['claude', 'codex-dev']);
-    await mkdir(join(root, '.trash', 'codex-dev-20260525T123456Z'), { recursive: true });
+    await writeProfiles(root, 'zcode', ['zcode', 'zcode-dev']);
+    await mkdir(join(root, '.trash', 'zcode-dev-20260525T123456Z'), { recursive: true });
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-05-25T12:34:56.000Z'));
 
-    await runProfileRemove('codex-dev', { rootDir: root });
+    await runProfileRemove('zcode-dev', { rootDir: root });
 
-    await expect(stat(join(root, '.trash', 'codex-dev-20260525T123456Z-1'))).resolves.toBeDefined();
+    await expect(stat(join(root, '.trash', 'zcode-dev-20260525T123456Z-1'))).resolves.toBeDefined();
   });
 
   it('purges only with --purge --yes', async () => {
     const root = await makeRoot();
-    await writeProfiles(root, 'claude', ['claude', 'codex-dev']);
+    await writeProfiles(root, 'zcode', ['zcode', 'zcode-dev']);
 
-    await expect(runProfileRemove('codex-dev', { rootDir: root, purge: true })).rejects.toThrow(/--yes/);
-    await runProfileRemove('codex-dev', { rootDir: root, purge: true, yes: true });
+    await expect(runProfileRemove('zcode-dev', { rootDir: root, purge: true })).rejects.toThrow(/--yes/);
+    await runProfileRemove('zcode-dev', { rootDir: root, purge: true, yes: true });
 
-    await expect(stat(join(root, 'profiles', 'codex-dev'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(stat(join(root, 'profiles', 'zcode-dev'))).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(stat(join(root, '.trash'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('exports profiles without secrets by default and requires --yes for secrets', async () => {
     const root = await makeRoot();
-    await writeProfiles(root, 'claude', ['claude']);
+    await writeProfiles(root, 'zcode', ['zcode']);
     const lines: string[] = [];
     vi.spyOn(console, 'log').mockImplementation((line: string) => lines.push(line));
 
-    await runProfileExport('claude', { rootDir: root });
+    await runProfileExport('zcode', { rootDir: root });
     const exported = JSON.parse(lines.join('\n')) as RootConfig;
 
     expect(JSON.stringify(exported)).not.toContain('plain-secret');
-    expect(exported.profiles.claude?.accounts.app.secret).toBe('[REDACTED]');
+    expect(exported.profiles.zcode?.accounts.app.secret).toBe('[REDACTED]');
     await expect(
-      runProfileExport('claude', { rootDir: root, includeSecrets: true }),
+      runProfileExport('zcode', { rootDir: root, includeSecrets: true }),
     ).rejects.toThrow(/--yes/);
   });
 
   it('materializes keystore app secret only when exporting with secrets', async () => {
     const root = await makeRoot();
-    await writeProfiles(root, 'claude', ['claude']);
-    const appId = 'cli_claude';
+    await writeProfiles(root, 'zcode', ['zcode']);
+    const appId = 'cli_zcode';
     const exportedSecret = 'test-export-secret-from-keystore';
-    const appPaths = resolveAppPaths({ rootDir: root, profile: 'claude' });
+    const appPaths = resolveAppPaths({ rootDir: root, profile: 'zcode' });
     const rootConfig = await readRoot(root);
     rootConfig.secrets = {
       providers: {
@@ -196,7 +195,7 @@ describe('profile retention and export', () => {
         },
       },
     };
-    rootConfig.profiles.claude!.accounts.app.secret = {
+    rootConfig.profiles.zcode!.accounts.app.secret = {
       source: 'exec',
       provider: 'bridge',
       id: secretKeyForApp(appId),
@@ -206,24 +205,24 @@ describe('profile retention and export', () => {
     const lines: string[] = [];
     vi.spyOn(console, 'log').mockImplementation((line: string) => lines.push(line));
 
-    await runProfileExport('claude', { rootDir: root });
+    await runProfileExport('zcode', { rootDir: root });
     const safeExport = JSON.parse(lines.pop() ?? '') as RootConfig;
-    await runProfileExport('claude', { rootDir: root, includeSecrets: true, yes: true });
+    await runProfileExport('zcode', { rootDir: root, includeSecrets: true, yes: true });
     const secretExport = JSON.parse(lines.pop() ?? '') as RootConfig;
 
     expect(JSON.stringify(safeExport)).not.toContain(exportedSecret);
-    expect(safeExport.profiles.claude?.accounts.app.secret).toBe('[REDACTED]');
-    expect(secretExport.profiles.claude?.accounts.app.secret).toBe(exportedSecret);
+    expect(safeExport.profiles.zcode?.accounts.app.secret).toBe('[REDACTED]');
+    expect(secretExport.profiles.zcode?.accounts.app.secret).toBe(exportedSecret);
   });
 
   it('materializes file app secret only when exporting with secrets', async () => {
     const root = await makeRoot();
-    await writeProfiles(root, 'claude', ['claude']);
+    await writeProfiles(root, 'zcode', ['zcode']);
     const exportedSecret = 'test-export-secret-from-file';
     const secretFile = join(root, 'app-secret.txt');
     await writeFile(secretFile, `${exportedSecret}\n`, 'utf8');
     const rootConfig = await readRoot(root);
-    rootConfig.profiles.claude!.accounts.app.secret = {
+    rootConfig.profiles.zcode!.accounts.app.secret = {
       source: 'file',
       id: secretFile,
     };
@@ -231,33 +230,33 @@ describe('profile retention and export', () => {
     const lines: string[] = [];
     vi.spyOn(console, 'log').mockImplementation((line: string) => lines.push(line));
 
-    await runProfileExport('claude', { rootDir: root });
+    await runProfileExport('zcode', { rootDir: root });
     const safeExport = JSON.parse(lines.pop() ?? '') as RootConfig;
-    await runProfileExport('claude', { rootDir: root, includeSecrets: true, yes: true });
+    await runProfileExport('zcode', { rootDir: root, includeSecrets: true, yes: true });
     const secretExport = JSON.parse(lines.pop() ?? '') as RootConfig;
 
     expect(JSON.stringify(safeExport)).not.toContain(exportedSecret);
-    expect(safeExport.profiles.claude?.accounts.app.secret).toBe('[REDACTED]');
-    expect(secretExport.profiles.claude?.accounts.app.secret).toBe(exportedSecret);
+    expect(safeExport.profiles.zcode?.accounts.app.secret).toBe('[REDACTED]');
+    expect(secretExport.profiles.zcode?.accounts.app.secret).toBe(exportedSecret);
   });
 
   it('writes exports to a new output file and requires --force when it already exists', async () => {
     const root = await makeRoot();
-    await writeProfiles(root, 'claude', ['claude']);
+    await writeProfiles(root, 'zcode', ['zcode']);
     const output = join(root, 'profile-export.json');
 
-    await runProfileExport('claude', { rootDir: root, output });
-    await expect(readFile(output, 'utf8')).resolves.toContain('"activeProfile": "claude"');
-    await expect(runProfileExport('claude', { rootDir: root, output })).rejects.toThrow(/--force/);
-    await runProfileExport('claude', { rootDir: root, output, force: true });
+    await runProfileExport('zcode', { rootDir: root, output });
+    await expect(readFile(output, 'utf8')).resolves.toContain('"activeProfile": "zcode"');
+    await expect(runProfileExport('zcode', { rootDir: root, output })).rejects.toThrow(/--force/);
+    await runProfileExport('zcode', { rootDir: root, output, force: true });
   });
 
   it('exports profile permissions with migration markers and without runtime-only fields', async () => {
     const root = await makeRoot();
-    await writeProfiles(root, 'claude', ['claude']);
+    await writeProfiles(root, 'zcode', ['zcode']);
     const rootConfig = await readRoot(root);
-    rootConfig.migrations = { permissionDefaultsV1: ['claude'] };
-    const profile = rootConfig.profiles.claude!;
+    rootConfig.migrations = { permissionDefaultsV1: ['zcode'] };
+    const profile = rootConfig.profiles.zcode!;
     profile.permissions = {
       defaultAccess: 'workspace',
       maxAccess: 'workspace',
@@ -273,18 +272,18 @@ describe('profile retention and export', () => {
     const lines: string[] = [];
     vi.spyOn(console, 'log').mockImplementation((line: string) => lines.push(line));
 
-    await runProfileExport('claude', { rootDir: root });
+    await runProfileExport('zcode', { rootDir: root });
 
     const exported = JSON.parse(lines.pop() ?? '') as RootConfig & {
       profiles: Record<string, Record<string, unknown>>;
     };
-    expect(exported.migrations).toEqual({ permissionDefaultsV1: ['claude'] });
-    expect(exported.profiles.claude?.permissions).toEqual({
+    expect(exported.migrations).toEqual({ permissionDefaultsV1: ['zcode'] });
+    expect(exported.profiles.zcode?.permissions).toEqual({
       defaultAccess: 'workspace',
       maxAccess: 'workspace',
     });
-    expect(exported.profiles.claude).not.toHaveProperty('sandbox');
-    expect(exported.profiles.claude).not.toHaveProperty('permissionSource');
+    expect(exported.profiles.zcode).not.toHaveProperty('sandbox');
+    expect(exported.profiles.zcode).not.toHaveProperty('permissionSource');
   });
 });
 
@@ -297,9 +296,8 @@ async function makeRoot(): Promise<string> {
 async function writeProfiles(root: string, activeProfile: string, names: string[]): Promise<void> {
   const profiles: RootConfig['profiles'] = {};
   for (const name of names) {
-    const agentKind: AgentKind = name.startsWith('codex') ? 'codex' : 'claude';
     profiles[name] = createDefaultProfileConfig({
-      agentKind,
+      agentKind: 'zcode',
       accounts: {
         app: {
           id: `cli_${name.replace(/[^A-Za-z0-9]/g, '_')}`,
@@ -307,7 +305,7 @@ async function writeProfiles(root: string, activeProfile: string, names: string[
           tenant: 'feishu',
         },
       },
-      ...(agentKind === 'codex' ? { codex: { binaryPath: 'codex' } } : {}),
+      zcode: { runtimePath: join(root, 'zcode.cjs') },
     });
     await mkdir(join(root, 'profiles', name), { recursive: true });
   }
@@ -331,8 +329,8 @@ function processEntry(overrides: Partial<ProcessEntry>): ProcessEntry {
     pid: process.pid,
     appId: 'cli_test',
     tenant: 'feishu',
-    profileName: 'claude',
-    agentKind: 'claude',
+    profileName: 'zcode',
+    agentKind: 'zcode',
     configPath: '/tmp/config.json',
     startedAt: new Date().toISOString(),
     version: '0.1.32',

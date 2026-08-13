@@ -149,20 +149,19 @@ describe('topic message quote handling', () => {
     );
   });
 
-  it('keeps Kimi session resume isolated to each topic thread', async () => {
+  it('keeps session resume isolated to each topic thread', async () => {
     const info = vi.spyOn(log, 'info');
     const h = await createHarness({
-      agentKind: 'kimi',
       agentEvents: [
         [
-          { type: 'system', sessionId: 'kimi-session-a' },
-          { type: 'done', sessionId: 'kimi-session-a', terminationReason: 'normal' },
+          { type: 'system', sessionId: 'zcode-session-a' },
+          { type: 'done', sessionId: 'zcode-session-a', terminationReason: 'normal' },
         ],
         [
-          { type: 'system', sessionId: 'kimi-session-b' },
-          { type: 'done', sessionId: 'kimi-session-b', terminationReason: 'normal' },
+          { type: 'system', sessionId: 'zcode-session-b' },
+          { type: 'done', sessionId: 'zcode-session-b', terminationReason: 'normal' },
         ],
-        [{ type: 'done', sessionId: 'kimi-session-a', terminationReason: 'normal' }],
+        [{ type: 'done', sessionId: 'zcode-session-a', terminationReason: 'normal' }],
       ],
     });
     await startTestBridge(h);
@@ -178,7 +177,7 @@ describe('topic message quote handling', () => {
     );
     await waitFor(
       () =>
-        h.sessions.resumeFor('oc_topic_chat:omt_topic_a', h.workspace) === 'kimi-session-a',
+        h.sessions.resumeFor('oc_topic_chat:omt_topic_a', h.workspace) === 'zcode-session-a',
     );
 
     await h.channel.handlers.message?.(
@@ -192,7 +191,7 @@ describe('topic message quote handling', () => {
     );
     await waitFor(
       () =>
-        h.sessions.resumeFor('oc_topic_chat:omt_topic_b', h.workspace) === 'kimi-session-b',
+        h.sessions.resumeFor('oc_topic_chat:omt_topic_b', h.workspace) === 'zcode-session-b',
     );
 
     await h.channel.handlers.message?.(
@@ -210,27 +209,26 @@ describe('topic message quote handling', () => {
     expect(h.agent.runOptions[0]?.prompt).toContain('"threadId":"omt_topic_a"');
     expect(h.agent.runOptions[1]).toMatchObject({ sessionId: undefined });
     expect(h.agent.runOptions[1]?.prompt).toContain('"threadId":"omt_topic_b"');
-    expect(h.agent.runOptions[2]).toMatchObject({ sessionId: 'kimi-session-a' });
+    expect(h.agent.runOptions[2]).toMatchObject({ sessionId: 'zcode-session-a' });
     expect(h.agent.runOptions[2]?.prompt).toContain('"threadId":"omt_topic_a"');
     const sessionLogs = info.mock.calls.filter(([phase]) => phase === 'session');
     expect(sessionLogs).toContainEqual([
       'session',
       'resume',
-      { agent: 'kimi', hasSession: true },
+      { sessionId: 'zcode-session-a', cwd: h.workspace },
     ]);
     expect(sessionLogs).toContainEqual([
       'session',
       'set',
-      { agent: 'kimi', hasSession: true },
+      { sessionId: 'zcode-session-b' },
     ]);
-    expect(JSON.stringify(sessionLogs)).not.toMatch(/kimi-session-[ab]|omt_topic_[ab]/);
+    expect(JSON.stringify(sessionLogs)).not.toMatch(/omt_topic_[ab]/);
   });
 });
 
 async function createHarness(options: {
   chatMode?: 'group' | 'topic';
   quotedMessages?: Record<string, string>;
-  agentKind?: 'claude' | 'kimi';
   agentEvents?: FakeAgentEvents;
 } = {}): Promise<{
   tmp: TmpProfile;
@@ -246,7 +244,7 @@ async function createHarness(options: {
   const tmp = await createTmpProfile('topic-quote-');
   const workspace = await realpath(tmp.workspace);
   const baseProfileConfig = createDefaultProfileConfig({
-    agentKind: options.agentKind ?? 'claude',
+    agentKind: 'zcode',
     accounts: {
       app: {
         id: 'cli_test',
@@ -258,7 +256,7 @@ async function createHarness(options: {
       allowedChats: ['oc_topic_chat'],
       allowedUsers: ['ou_user'],
     },
-    ...(options.agentKind === 'kimi' ? { kimi: { binaryPath: 'kimi' } } : {}),
+    zcode: { runtimePath: join(tmp.root, 'zcode.cjs') },
   });
   const profileConfig = {
     ...baseProfileConfig,
@@ -271,7 +269,7 @@ async function createHarness(options: {
   const sessionCatalog = new SessionCatalog(join(tmp.profile, 'session-catalog.json'));
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
   const agent = new FakeAgentAdapter({
-    id: options.agentKind ?? 'claude',
+    id: 'zcode',
     events: options.agentEvents ?? [{ type: 'done', terminationReason: 'normal' }],
   });
   const channel = createFakeLarkChannel(options);

@@ -2,22 +2,17 @@ import { mkdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CardActionEvent, NormalizedMessage } from '@larksuite/channel';
-import { capabilityForProfile } from '../../../src/agent/capability.js';
 import { ActiveRuns } from '../../../src/bot/active-runs.js';
 import type { ChatModeCache } from '../../../src/bot/chat-mode-cache.js';
 import { PendingQueue } from '../../../src/bot/pending-queue.js';
 import { commandSessionCatalogIdentity } from '../../../src/bot/session-catalog-identity.js';
 import { handleCardAction } from '../../../src/card/dispatcher.js';
 import { tryHandleCommand, type CommandContext, type Controls } from '../../../src/commands/index.js';
-import { createDefaultProfileConfig, type AgentKind, type ProfileConfig } from '../../../src/config/profile-schema.js';
+import { createDefaultProfileConfig, type ProfileConfig } from '../../../src/config/profile-schema.js';
 import { canUseDm } from '../../../src/policy/access.js';
-import { evaluateRunPolicy } from '../../../src/policy/run-policy.js';
-import { resolveWorkingDirectory } from '../../../src/policy/workspace.js';
 import { SessionCatalog, type SessionCatalogIdentity } from '../../../src/session/catalog.js';
 import { SessionStore } from '../../../src/session/store.js';
 import { WorkspaceStore } from '../../../src/workspace/store.js';
-import type { CodexThreadHistoryEntry } from '../../../src/session/codex-history.js';
-import type { SessionSummary } from '../../../src/session/history.js';
 import { createFakeAgent } from '../../helpers/fake-agent.js';
 import { createFakeChannel, type FakeChannel } from '../../helpers/fake-channel.js';
 import { createTmpProfile, type TmpProfile } from '../../helpers/tmp-profile.js';
@@ -30,8 +25,6 @@ interface Harness {
   catalog: SessionCatalog;
   controls: Controls;
   identity: SessionCatalogIdentity;
-  claudeHistory: SessionSummary[];
-  codexHistory: CodexThreadHistoryEntry[];
   activeRuns: ActiveRuns;
   pending: PendingQueue;
   run(content: string, options?: {
@@ -44,88 +37,63 @@ interface Harness {
 
 const cleanups: Array<() => Promise<void>> = [];
 
-describe('agent-aware resume commands', () => {
+describe('zcode catalog resume commands', () => {
   afterEach(async () => {
     await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
   });
 
   it('archives only the current catalog entry when starting a new conversation', async () => {
-    const h = await createHarness('claude');
+    const h = await createHarness();
     h.catalog.upsertActive({ ...h.identity, sessionId: 'sess-current', now: 1000 });
     h.catalog.upsertActive({
       ...h.identity,
-      agentId: 'codex',
-      threadId: 'thread-other-agent',
+      scopeId: 'chat-other',
+      sessionId: 'sess-other-scope',
       now: 1000,
     });
 
     await expect(h.run('/new')).resolves.toBe(true);
 
     expect(h.catalog.activeFor(h.identity)).toBeUndefined();
-    expect(h.catalog.activeFor({ ...h.identity, agentId: 'codex' })).toMatchObject({
-      threadId: 'thread-other-agent',
-    });
+    expect(
+      h.catalog.activeFor({ ...h.identity, scopeId: 'chat-other' }),
+    ).toMatchObject({ sessionId: 'sess-other-scope' });
   });
 
-  it('switches model by clearing the current resumable Claude session', async () => {
-    const h = await createHarness('claude');
+  it('switches model by clearing the current resumable ZCode session', async () => {
+    const h = await createHarness();
     h.sessions.set('chat-1', 'sess-current', h.identity.cwdRealpath);
     h.catalog.upsertActive({ ...h.identity, sessionId: 'sess-current', now: 1000 });
 
-    await expect(h.run('/model gpt-5 high')).resolves.toBe(true);
+    await expect(h.run('/model glm-5.2')).resolves.toBe(true);
 
     expect(h.catalog.activeFor(h.identity)).toBeUndefined();
     expect(h.sessions.resumeFor('chat-1', h.identity.cwdRealpath)).toBeUndefined();
-    expect(h.sessions.getModel('chat-1')).toBe('gpt-5');
-    expect(h.sessions.getReasoningEffort('chat-1')).toBe('high');
-    expect(lastMarkdown(h.channel)).toContain('下一条消息会启动新 session');
-  });
-
-  it('switches model by clearing the current resumable Codex thread', async () => {
-    const h = await createHarness('codex');
-    h.catalog.upsertActive({ ...h.identity, threadId: 'thread-current', now: 1000 });
-
-    await expect(h.run('/model gpt-5.6-sol ultra')).resolves.toBe(true);
-
-    expect(h.catalog.activeFor(h.identity)).toBeUndefined();
-    expect(h.sessions.getModel('chat-1')).toBe('gpt-5.6-sol');
-    expect(h.sessions.getReasoningEffort('chat-1')).toBe('ultra');
-  });
-
-  it('switches model by clearing the current resumable Kimi session', async () => {
-    const h = await createHarness('kimi');
-    h.sessions.set('chat-1', 'sess-current', h.identity.cwdRealpath);
-    h.catalog.upsertActive({ ...h.identity, sessionId: 'sess-current', now: 1000 });
-
-    await expect(h.run('/model kimi/k2')).resolves.toBe(true);
-
-    expect(h.catalog.activeFor(h.identity)).toBeUndefined();
-    expect(h.sessions.resumeFor('chat-1', h.identity.cwdRealpath)).toBeUndefined();
-    expect(h.sessions.getModel('chat-1')).toBe('kimi/k2');
+    expect(h.sessions.getModel('chat-1')).toBe('glm-5.2');
     expect(h.sessions.getReasoningEffort('chat-1')).toBeUndefined();
     expect(lastMarkdown(h.channel)).toContain('下一条消息会启动新 session');
   });
 
-  it('rejects Kimi reasoning-effort arguments without changing model state', async () => {
-    const h = await createHarness('kimi');
+  it('rejects reasoning-effort arguments without changing model state', async () => {
+    const h = await createHarness();
 
-    await expect(h.run('/model kimi-k2 high')).resolves.toBe(true);
+    await expect(h.run('/model glm-5.2 high')).resolves.toBe(true);
 
     expect(h.sessions.getModel('chat-1')).toBeUndefined();
     expect(h.sessions.getReasoningEffort('chat-1')).toBeUndefined();
-    expect(lastMarkdown(h.channel)).toContain('Kimi Code 当前只支持切换模型 id');
+    expect(lastMarkdown(h.channel)).toContain('只支持切换模型 id');
   });
 
-  it('explains that Kimi cloud-document comments are disabled during the pilot', async () => {
-    const h = await createHarness('kimi');
+  it('explains that cloud-document comments need no workspace binding', async () => {
+    const h = await createHarness();
 
     await expect(h.run('/doc')).resolves.toBe(true);
 
-    expect(lastMarkdown(h.channel)).toContain('暂不处理云文档评论');
+    expect(lastMarkdown(h.channel)).toContain('不需要绑定工作区');
   });
 
-  it('allows resume use only for the current agent/cwd/policy catalog entry', async () => {
-    const h = await createHarness('claude');
+  it('allows resume use only for the current cwd/policy catalog entry', async () => {
+    const h = await createHarness();
     h.catalog.upsertActive({ ...h.identity, sessionId: 'sess-current', now: 1000 });
     h.catalog.upsertActive({
       ...h.identity,
@@ -143,51 +111,37 @@ describe('agent-aware resume commands', () => {
     expect(lastMarkdown(h.channel)).toContain('已完成');
   });
 
-  it('resumes the selected Claude history entry from the card button callback', async () => {
-    const h = await createHarness('claude');
-    h.sessions.set('chat-1', 'sess-current', h.identity.cwdRealpath);
+  it('resumes the current catalog session through a nonce confirmation', async () => {
+    const h = await createHarness();
     h.catalog.upsertActive({ ...h.identity, sessionId: 'sess-current', now: 1000 });
-    h.claudeHistory.push(
-      claudeSession('sess-current', 'current prompt', 1_700_000_100_000),
-      claudeSession('sess-target', 'target prompt', 1_700_000_000_000),
-    );
-
-    await expect(h.run('/resume')).resolves.toBe(true);
-
-    const card = lastContent(h.channel);
-    const rendered = JSON.stringify(card);
-    expect(rendered).toContain('current prompt');
-    expect(rendered).toContain('target prompt');
-    expect(rendered).toContain('sess-tar');
-
-    const nonces = resumeArgsFromCard(card);
-    expect(nonces).toHaveLength(2);
-    expect(nonces[1]).not.toBe('sess-target');
-    await h.dispatchResumeArg(nonces[1]!);
-
-    expect(h.sessions.resumeFor('chat-1', h.identity.cwdRealpath)).toBe('sess-target');
-    expect(h.catalog.activeFor(h.identity)).toMatchObject({
-      sessionId: 'sess-target',
-    });
-    expect(lastMarkdown(h.channel)).toContain('已完成');
-  });
-
-  it('accepts the current Codex thread without writing it into legacy SessionStore', async () => {
-    const h = await createHarness('codex');
-    h.catalog.upsertActive({ ...h.identity, threadId: 'thread-current', now: 1000 });
 
     await expect(h.run('/resume')).resolves.toBe(true);
     const nonce = resumeNonce(lastMarkdown(h.channel));
 
     await expect(h.run(`/resume use ${nonce}`)).resolves.toBe(true);
 
-    expect(h.sessions.getRaw('chat-1')).toBeUndefined();
+    expect(h.sessions.resumeFor('chat-1', h.identity.cwdRealpath)).toBe('sess-current');
+    expect(h.catalog.activeFor(h.identity)).toMatchObject({ sessionId: 'sess-current' });
+    expect(lastMarkdown(h.channel)).toContain('已完成');
+  });
+
+  it('resumes the current catalog session from the card button callback', async () => {
+    const h = await createHarness();
+    h.catalog.upsertActive({ ...h.identity, sessionId: 'sess-current', now: 1000 });
+
+    await expect(h.run('/resume')).resolves.toBe(true);
+    const nonce = resumeNonce(lastMarkdown(h.channel));
+
+    await h.dispatchResumeArg(nonce);
+
+    expect(h.sessions.resumeFor('chat-1', h.identity.cwdRealpath)).toBe('sess-current');
+    expect(h.catalog.activeFor(h.identity)).toMatchObject({ sessionId: 'sess-current' });
     expect(lastMarkdown(h.channel)).toContain('已完成');
   });
 
   it('falls back to an audit-safe reply when resume confirmation is rejected', async () => {
-    const h = await createHarness('codex');
-    h.catalog.upsertActive({ ...h.identity, threadId: 'thread-current', now: 1000 });
+    const h = await createHarness();
+    h.catalog.upsertActive({ ...h.identity, sessionId: 'sess-current', now: 1000 });
     await expect(h.run('/resume')).resolves.toBe(true);
     const nonce = resumeNonce(lastMarkdown(h.channel));
     const originalSend = h.channel.send.bind(h.channel);
@@ -208,38 +162,34 @@ describe('agent-aware resume commands', () => {
     expect(lastMarkdown(h.channel)).toBe('命令已处理。');
   });
 
-  it('shows only the current catalog-backed Codex thread in /resume', async () => {
-    const h = await createHarness('codex');
-    h.catalog.upsertActive({ ...h.identity, threadId: 'thread-current', now: 1000 });
+  it('shows only a nonce for the current catalog-backed session in /resume', async () => {
+    const h = await createHarness();
+    h.catalog.upsertActive({ ...h.identity, sessionId: 'sess-current-secret', now: 1000 });
 
     await expect(h.run('/resume')).resolves.toBe(true);
 
-    expect(lastMarkdown(h.channel)).toContain('当前 Codex thread 可恢复');
+    expect(lastMarkdown(h.channel)).toContain('当前 ZCode session 可恢复');
     expect(lastMarkdown(h.channel)).toMatch(/\/resume use [a-f0-9-]+/);
-    expect(lastMarkdown(h.channel)).not.toContain('thread-current');
+    expect(lastMarkdown(h.channel)).not.toContain('sess-current-secret');
   });
 
-  it('does not accept raw Codex thread ids as resume candidates', async () => {
-    const h = await createHarness('codex');
-    h.catalog.upsertActive({ ...h.identity, threadId: 'thread-current', now: 1000 });
+  it('does not accept raw session ids from a different policy context', async () => {
+    const h = await createHarness();
+    h.catalog.upsertActive({
+      ...h.identity,
+      policyFingerprint: 'stale-fp',
+      sessionId: 'sess-stale',
+      now: 1000,
+    });
 
-    await expect(h.run('/resume use thread-current')).resolves.toBe(true);
+    await expect(h.run('/resume use sess-stale')).resolves.toBe(true);
 
     expect(h.sessions.getRaw('chat-1')).toBeUndefined();
-    expect(lastMarkdown(h.channel)).toContain('请先用 `/resume`');
+    expect(lastMarkdown(h.channel)).toContain('不可恢复');
   });
 
-  it('does not fall back to legacy SessionStore when Codex catalog identity is missing', async () => {
-    const h = await createHarness('codex');
-
-    await expect(h.run('/resume use thread-current', { withCatalogIdentity: false })).resolves.toBe(true);
-
-    expect(h.sessions.getRaw('chat-1')).toBeUndefined();
-    expect(lastMarkdown(h.channel)).toContain('当前上下文没有可恢复的 Codex thread');
-  });
-
-  it('does not fall back to legacy SessionStore when Kimi catalog identity is missing', async () => {
-    const h = await createHarness('kimi');
+  it('does not fall back to legacy SessionStore when the catalog identity is missing', async () => {
+    const h = await createHarness();
     h.sessions.set('chat-1', 'legacy-current', h.identity.cwdRealpath);
 
     await expect(
@@ -247,193 +197,87 @@ describe('agent-aware resume commands', () => {
     ).resolves.toBe(true);
 
     expect(h.sessions.resumeFor('chat-1', h.identity.cwdRealpath)).toBe('legacy-current');
-    expect(lastMarkdown(h.channel)).toContain('没有符合当前工作区和权限策略的 Kimi session');
+    expect(lastMarkdown(h.channel)).toContain('没有符合当前工作区和权限策略的 ZCode session');
   });
 
-  it('does not list Claude local history for Codex when no current thread is recorded', async () => {
-    const h = await createHarness('codex');
+  it('shows an empty history card when no current session is recorded', async () => {
+    const h = await createHarness();
 
     await expect(h.run('/resume')).resolves.toBe(true);
 
     expect(lastContentString(h.channel)).toContain('此 cwd 下没有历史会话');
   });
 
-  it('lists Codex history for the current cwd and resumes the selected thread through a nonce', async () => {
-    const h = await createHarness('codex');
-    h.codexHistory.push(
-      codexThread('thread-alpha-secret', 'alpha prompt', 1_700_000_100_000),
-      codexThread('thread-beta-secret', 'beta prompt', 1_700_000_000_000),
-    );
-
-    await expect(h.run('/resume')).resolves.toBe(true);
-
-    const card = lastContent(h.channel);
-    const rendered = JSON.stringify(card);
-    expect(rendered).toContain('alpha prompt');
-    expect(rendered).toContain('beta prompt');
-    expect(rendered).not.toContain('thread-alpha-secret');
-    expect(rendered).not.toContain('thread-beta-secret');
-
-    const nonces = resumeArgsFromCard(card);
-    expect(nonces).toHaveLength(2);
-    await expect(h.run(`/resume use ${nonces[1]}`)).resolves.toBe(true);
-
-    expect(h.catalog.activeFor(h.identity)).toMatchObject({
-      threadId: 'thread-beta-secret',
-    });
-    expect(h.sessions.getRaw('chat-1')).toBeUndefined();
-    expect(lastMarkdown(h.channel)).toContain('已完成');
-  });
-
-  it('resumes a Codex history selection from the card button callback', async () => {
-    const h = await createHarness('codex');
-    h.codexHistory.push(codexThread('thread-alpha-secret', 'alpha prompt', 1_700_000_100_000));
-
-    await expect(h.run('/resume')).resolves.toBe(true);
-
-    const [nonce] = resumeArgsFromCard(lastContent(h.channel));
-    expect(nonce).toBeTypeOf('string');
-    await h.dispatchResumeArg(nonce!);
-
-    expect(h.catalog.activeFor(h.identity)).toMatchObject({
-      threadId: 'thread-alpha-secret',
-    });
-    expect(lastMarkdown(h.channel)).toContain('已完成');
-  });
-
-  it('keeps Codex resume history details out of group chats like Claude', async () => {
-    const h = await createHarness('codex');
-    h.codexHistory.push(codexThread('thread-alpha-secret', 'alpha prompt', 1_700_000_100_000));
+  it('keeps resume session details out of group chats', async () => {
+    const h = await createHarness();
+    h.catalog.upsertActive({ ...h.identity, sessionId: 'sess-group-secret', now: 1000 });
 
     await expect(h.run('/resume', { chatMode: 'group' })).resolves.toBe(true);
 
     const rendered = lastContentString(h.channel);
     expect(rendered).toContain('私聊');
-    expect(rendered).not.toContain('alpha prompt');
-    expect(rendered).not.toContain('thread-alpha-secret');
+    expect(rendered).not.toContain('sess-group-secret');
   });
 
-  it('labels Codex status as session while reading the recorded thread id', async () => {
-    const h = await createHarness('codex');
+  it('labels /status as session while reading the recorded session id', async () => {
+    const h = await createHarness();
 
     await expect(h.run('/status')).resolves.toBe(true);
     let status = JSON.stringify(lastContent(h.channel));
     expect(status).toContain('**session**');
-    expect(status).toContain('未建立');
     expect(status).not.toContain('**thread**');
     expect(status).not.toContain('**conversation**');
 
-    h.catalog.upsertActive({ ...h.identity, threadId: 'thread-current', now: 1000 });
+    h.catalog.upsertActive({ ...h.identity, sessionId: 'sess-current-visible', now: 1000 });
     await expect(h.run('/status')).resolves.toBe(true);
 
     status = JSON.stringify(lastContent(h.channel));
     expect(status).toContain('**session**');
-    expect(status).toContain('thread-c');
-    expect(status).not.toContain('未建立');
+    expect(status).toContain('sess-cur');
   });
 
-  it('does not list local history from home when no workspace is bound', async () => {
-    const h = await createHarness('claude', { bindWorkspace: false, defaultWorkspace: false });
+  it('requires a selected workspace before listing or applying resume', async () => {
+    const h = await createHarness({ bindWorkspace: false, defaultWorkspace: false });
 
     await expect(h.run('/resume')).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('请先使用 /cd');
 
+    await expect(h.run('/resume use sess-anything')).resolves.toBe(true);
     expect(lastMarkdown(h.channel)).toContain('请先使用 /cd');
   });
 
-  it('does not build a Kimi resume identity outside the profile default root', async () => {
-    const h = await createHarness('kimi');
-    const outside = join(h.tmp.root, 'outside-workspace');
-    await mkdir(outside, { recursive: true });
-    h.workspaces.setCwd('chat-1', outside);
+  it('rejects resume use when the selected cwd no longer matches the catalog identity', async () => {
+    const h = await createHarness();
+    h.catalog.upsertActive({ ...h.identity, sessionId: 'sess-current', now: 1000 });
+    const moved = join(h.tmp.root, 'moved-workspace');
+    await mkdir(moved, { recursive: true });
+    h.workspaces.setCwd('chat-1', await realpath(moved));
 
-    const identity = await commandSessionCatalogIdentity({
-      msg: message('/resume'),
-      scope: 'chat-1',
-      mode: 'p2p',
-      workspaces: h.workspaces,
-      controls: h.controls,
-      access: canUseDm(h.controls.profileConfig, h.controls, 'ou-user'),
-    });
+    await expect(h.run('/resume use sess-current')).resolves.toBe(true);
 
-    expect(identity).toBeUndefined();
-  });
-
-  it('builds and uses a Kimi resume identity in an additional authorized root', async () => {
-    const h = await createHarness('kimi');
-    const additionalRoot = join(h.tmp.root, 'authorized-project');
-    const additionalCwd = join(additionalRoot, 'packages', 'app');
-    await mkdir(additionalCwd, { recursive: true });
-    h.controls.profileConfig.workspaces.allowedRoots = [await realpath(additionalRoot)];
-    h.workspaces.setCwd('chat-1', additionalCwd);
-
-    const identity = await commandSessionCatalogIdentity({
-      msg: message('/resume'),
-      scope: 'chat-1',
-      mode: 'p2p',
-      workspaces: h.workspaces,
-      controls: h.controls,
-      access: canUseDm(h.controls.profileConfig, h.controls, 'ou-user'),
-    });
-    expect(identity?.cwdRealpath).toBe(await realpath(additionalCwd));
-    if (!identity) throw new Error('expected additional-root identity');
-    h.catalog.upsertActive({ ...identity, sessionId: 'kimi-additional-session', now: 1000 });
-
-    await expect(h.run('/resume', { catalogIdentity: identity })).resolves.toBe(true);
-    const nonce = resumeNonce(lastMarkdown(h.channel));
-    await expect(
-      h.run(`/resume use ${nonce}`, { catalogIdentity: identity }),
-    ).resolves.toBe(true);
-
-    expect(h.sessions.resumeFor('chat-1', identity.cwdRealpath)).toBe(
-      'kimi-additional-session',
-    );
-    await expect(h.run('/status', { catalogIdentity: identity })).resolves.toBe(true);
-    const status = lastContentString(h.channel);
-    expect(status).toContain('kimi-add');
-    expect(status).toContain(JSON.stringify(identity.cwdRealpath).slice(1, -1));
-  });
-
-  it('does not render a stale Kimi cwd outside all authorized roots', async () => {
-    const h = await createHarness('kimi');
-    const additionalRoot = join(h.tmp.root, 'authorized-project');
-    const outside = join(h.tmp.root, 'outside-workspace');
-    await Promise.all([
-      mkdir(additionalRoot, { recursive: true }),
-      mkdir(outside, { recursive: true }),
-    ]);
-    h.controls.profileConfig.workspaces.allowedRoots = [await realpath(additionalRoot)];
-    h.workspaces.setCwd('chat-1', outside);
-
-    await expect(h.run('/resume', { withCatalogIdentity: false })).resolves.toBe(true);
-    expect(lastMarkdown(h.channel)).toContain('请先使用 /cd');
-    expect(lastMarkdown(h.channel)).not.toContain(outside);
-
-    await expect(h.run('/status', { withCatalogIdentity: false })).resolves.toBe(true);
-    expect(lastContentString(h.channel)).not.toContain(outside);
+    expect(lastMarkdown(h.channel)).toContain('请先用 `/resume`');
+    expect(h.sessions.getRaw('chat-1')).toBeUndefined();
   });
 });
 
 async function createHarness(
-  agentKind: AgentKind,
   options: { bindWorkspace?: boolean; defaultWorkspace?: boolean } = {},
 ): Promise<Harness> {
-  const tmp = await createTmpProfile(`resume-command-${agentKind}-`);
+  const tmp = await createTmpProfile('resume-command-zcode-');
   const channel = createFakeChannel();
   const sessions = new SessionStore(join(tmp.profile, 'sessions.json'));
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
   const catalog = new SessionCatalog(join(tmp.profile, 'session-catalog.json'));
-  const claudeHistory: SessionSummary[] = [];
-  const codexHistory: CodexThreadHistoryEntry[] = [];
   const activeRuns = new ActiveRuns();
   const pending = new PendingQueue(60_000, () => {});
   const agent = createFakeAgent();
-  const profileConfig = appConfig(agentKind);
+  const profileConfig = appConfig();
   const workspaceRealpath = await realpath(tmp.workspace);
   if (options.defaultWorkspace !== false) {
     profileConfig.workspaces.default = workspaceRealpath;
   }
   const controls = {
-    profile: agentKind,
+    profile: 'zcode',
     profileConfig,
     botOwnerId: 'ou-user',
     ownerRefreshState: 'ok',
@@ -447,7 +291,14 @@ async function createHarness(
   if (options.bindWorkspace !== false) {
     workspaces.setCwd('chat-1', workspaceRealpath);
   }
-  const identity = await commandIdentity(agentKind, profileConfig, controls, workspaceRealpath);
+  const identity = await commandSessionCatalogIdentity({
+    msg: message('/resume'),
+    scope: 'chat-1',
+    mode: 'p2p',
+    workspaces,
+    controls,
+    access: canUseDm(profileConfig, controls, 'ou-user'),
+  });
   const chatModeCache = {
     resolve: async () => 'p2p',
   } as unknown as ChatModeCache;
@@ -475,8 +326,6 @@ async function createHarness(
       agent,
       activeRuns,
       controls,
-      claudeHistoryProvider: async () => claudeHistory,
-      codexHistoryProvider: async () => codexHistory,
     });
 
   const dispatchResumeArg = (arg: string): Promise<void> =>
@@ -506,9 +355,7 @@ async function createHarness(
     workspaces,
     catalog,
     controls,
-    identity,
-    claudeHistory,
-    codexHistory,
+    identity: identity as SessionCatalogIdentity,
     activeRuns,
     pending,
     run,
@@ -516,62 +363,12 @@ async function createHarness(
   };
 }
 
-function claudeSession(
-  sessionId: string,
-  preview: string,
-  mtime: number,
-): SessionSummary {
-  return {
-    sessionId,
-    preview,
-    mtime,
-    lineCount: 1,
-  };
-}
-
-async function commandIdentity(
-  agentKind: AgentKind,
-  profileConfig: ProfileConfig,
-  controls: Controls,
-  cwd: string,
-): Promise<SessionCatalogIdentity> {
-  const workspace = await resolveWorkingDirectory(cwd);
-  if (!workspace.ok) throw new Error(workspace.userVisible);
-  const capability = capabilityForProfile(profileConfig);
-  const access = canUseDm(profileConfig, controls, 'ou-user');
-  const policy = evaluateRunPolicy({
-    scope: {
-      source: 'im',
-      chatId: 'chat-1',
-      actorId: 'ou-user',
-    },
-    attachments: [],
-    prompt: '',
-    requestedCwd: cwd,
-    cwdRealpath: workspace.cwdRealpath,
-    access,
-    capability,
-    profileConfig,
-    now: Date.now(),
-    codexHome: profileConfig.codex?.codexHome,
-    inheritCodexHome: profileConfig.codex?.inheritCodexHome,
-  });
-  if (!policy.ok) throw new Error(policy.rejectReason.userVisible);
-  return {
-    scopeId: 'chat-1',
-    agentId: capability.agentId,
-    cwdRealpath: workspace.cwdRealpath,
-    policyFingerprint: policy.policyFingerprint,
-  };
-}
-
-function appConfig(agentKind: AgentKind): ProfileConfig {
+function appConfig(): ProfileConfig {
   return createDefaultProfileConfig({
-    agentKind,
+    agentKind: 'zcode',
     accounts: { app: { id: 'app-id', secret: 'secret', tenant: 'feishu' } },
     access: { admins: ['ou-user'] },
-    ...(agentKind === 'codex' ? { codex: { binaryPath: '/usr/local/bin/codex' } } : {}),
-    ...(agentKind === 'kimi' ? { kimi: { binaryPath: '/usr/local/bin/kimi' } } : {}),
+    zcode: { runtimePath: '/usr/local/bin/zcode' },
   });
 }
 
@@ -622,36 +419,4 @@ function resumeNonce(markdown: string): string {
   expect(nonce).toBeTypeOf('string');
   if (!nonce) throw new Error('missing resume nonce');
   return nonce;
-}
-
-function resumeArgsFromCard(card: unknown): string[] {
-  const out: string[] = [];
-  const visit = (value: unknown): void => {
-    if (!value || typeof value !== 'object') return;
-    const record = value as Record<string, unknown>;
-    const action = record.value as Record<string, unknown> | undefined;
-    if (action?.cmd === 'resume.use' && typeof action.arg === 'string') out.push(action.arg);
-    for (const child of Object.values(record)) {
-      if (Array.isArray(child)) child.forEach(visit);
-      else visit(child);
-    }
-  };
-  visit(card);
-  return out;
-}
-
-function codexThread(
-  threadId: string,
-  preview: string,
-  updatedAtMs: number,
-): CodexThreadHistoryEntry {
-  return {
-    threadId,
-    sessionId: threadId,
-    preview,
-    cwd: '/tmp/workspace',
-    createdAtMs: updatedAtMs - 1000,
-    updatedAtMs,
-    source: 'exec',
-  };
 }

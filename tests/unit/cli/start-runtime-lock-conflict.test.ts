@@ -23,22 +23,15 @@ vi.mock('../../../src/runtime/locks', async (importOriginal) => {
   };
 });
 
-vi.mock('../../../src/agent/codex/adapter', () => ({
-  CodexAdapter: class {
-    id = 'codex';
-    displayName = 'Codex CLI';
+vi.mock('../../../src/agent/zcode/adapter', () => ({
+  ZcodeAdapter: class {
+    id = 'zcode';
+    displayName = 'ZCode CLI';
     async isAvailable() {
       return true;
     }
-  },
-}));
-
-vi.mock('../../../src/agent/claude/adapter', () => ({
-  ClaudeAdapter: class {
-    id = 'claude';
-    displayName = 'Claude Code';
-    async isAvailable() {
-      return true;
+    async checkAvailability() {
+      return { ok: true };
     }
   },
 }));
@@ -49,46 +42,45 @@ describe('run runtime lock conflict handling', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.resolveProfileRuntime.mockResolvedValue({
-      profile: 'codex',
-      configPath: '/tmp/lark-channel-home/config.json',
+      profile: 'zcode',
+      configPath: '/tmp/lark-zcode-home/config.json',
       appPaths: {
-        profile: 'codex',
-        rootDir: '/tmp/lark-channel-home',
-        profileDir: '/tmp/lark-channel-home/profiles/codex',
-        logsDir: '/tmp/lark-channel-home/profiles/codex/logs',
-        mediaDir: '/tmp/lark-channel-home/profiles/codex/media',
-        sessionsFile: '/tmp/lark-channel-home/profiles/codex/sessions.json',
-        workspacesFile: '/tmp/lark-channel-home/profiles/codex/workspaces.json',
-        userRegistryFile: '/tmp/lark-channel-home/registry/processes.json',
-        larkCliConfigDir: '/tmp/lark-channel-home/profiles/codex/lark-cli',
-        larkCliSourceConfigFile: '/tmp/lark-channel-home/profiles/codex/lark-cli-source/config.json',
-        profileLockFile: '/tmp/lark-channel-home/registry/locks/profile/codex.lock',
-        appLockFile: (appId: string) => `/tmp/lark-channel-home/registry/locks/app/${appId}.lock`,
+        profile: 'zcode',
+        rootDir: '/tmp/lark-zcode-home',
+        profileDir: '/tmp/lark-zcode-home/profiles/zcode',
+        logsDir: '/tmp/lark-zcode-home/profiles/zcode/logs',
+        mediaDir: '/tmp/lark-zcode-home/profiles/zcode/media',
+        sessionsFile: '/tmp/lark-zcode-home/profiles/zcode/sessions.json',
+        workspacesFile: '/tmp/lark-zcode-home/profiles/zcode/workspaces.json',
+        userRegistryFile: '/tmp/lark-zcode-home/registry/processes.json',
+        larkCliConfigDir: '/tmp/lark-zcode-home/profiles/zcode/lark-cli',
+        larkCliSourceConfigFile: '/tmp/lark-zcode-home/profiles/zcode/lark-cli-source/config.json',
+        profileLockFile: '/tmp/lark-zcode-home/registry/locks/profile/zcode.lock',
+        appLockFile: (appId: string) => `/tmp/lark-zcode-home/registry/locks/app/${appId}.lock`,
       },
       cfg: {
         accounts: {
           app: {
-            id: 'cli_codex',
+            id: 'cli_zcode',
             secret: '${APP_SECRET}',
             tenant: 'feishu',
           },
         },
-        agentKind: 'codex',
+        agentKind: 'zcode',
       },
       profileConfig: {
-        agentKind: 'codex',
+        agentKind: 'zcode',
         accounts: {
           app: {
-            id: 'cli_codex',
+            id: 'cli_zcode',
             secret: '${APP_SECRET}',
             tenant: 'feishu',
           },
         },
-        codex: {
-          binaryPath: '/usr/local/bin/codex',
-          realpath: '/usr/local/bin/codex',
-          version: 'codex 1.2.3',
-          sha256: '0'.repeat(64),
+        zcode: {
+          runtimePath: '/opt/zcode/zcode.cjs',
+          realpath: '/opt/zcode/zcode.cjs',
+          version: '0.16.3',
         },
         sandbox: { defaultMode: 'danger-full-access', maxMode: 'danger-full-access' },
         workspaces: {},
@@ -99,9 +91,9 @@ describe('run runtime lock conflict handling', () => {
   it('stops the current profile lock holder and retries foreground run after confirmation', async () => {
     const holder: RuntimeLockMeta = {
       kind: 'profile',
-      target: '/tmp/lark-channel-home/registry/locks/profile/codex.lock',
-      profile: 'codex',
-      agentKind: 'codex',
+      target: '/tmp/lark-zcode-home/registry/locks/profile/zcode.lock',
+      profile: 'zcode',
+      agentKind: 'zcode',
       pid: 83130,
       startedAt: '2026-05-28T12:50:39.072Z',
     };
@@ -115,7 +107,7 @@ describe('run runtime lock conflict handling', () => {
 
     await expect(
       runStart({
-        profile: 'codex',
+        profile: 'zcode',
         skipCheckLarkCli: true,
         confirmStopRuntimeLockProcess: async () => true,
         stopRuntimeLockProcess: async (meta) => {

@@ -1,10 +1,10 @@
 > 本文件由项目根目录 `AGENTS.md` 派生，用于 Claude Code 的 skill 自动触发等增强能力。
 > 通用项目约定（技术栈、命令、红线）请以 `AGENTS.md` 为真值；冲突时以 `AGENTS.md` 为准。
 
-# 项目约定 — lark-channel-bridge-src
+# 项目约定 — lark-zcode-bridge
 
 ## 项目定位
-飞书/Lark 与本地 Claude Code、Codex CLI、Kimi Code CLI 的 bridge。转发消息、流式卡片、会话连续性、队列/批处理、多 workspace、图片/文件、交互卡片。
+飞书/Lark 与本地 **ZCode CLI** 的 bridge（zcode-only fork，上游 lark-channel-bridge）。转发消息、流式卡片、会话连续性、队列/批处理、多 workspace、图片/文件、交互卡片。唯一 agent 是 `src/agent/zcode/` 的 ZcodeAdapter；默认完整权限（yolo）；独立配置根 `~/.lark-zcode-bridge/`，绝不与 `~/.lark-channel/` 共享。
 
 ## 技术栈
 - 语言：TypeScript

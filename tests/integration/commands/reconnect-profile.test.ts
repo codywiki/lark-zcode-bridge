@@ -82,13 +82,14 @@ async function createHarness(): Promise<{
   const activeRuns = new ActiveRuns();
   const agent = new FakeAgentAdapter();
   const profileConfig = createDefaultProfileConfig({
-    agentKind: 'claude',
+    agentKind: 'zcode',
     accounts: { app: { id: 'cli_test', secret: '${APP_SECRET}', tenant: 'feishu' } },
     access: { admins: ['ou-admin'] },
+    zcode: { runtimePath: '/usr/local/bin/zcode' },
   });
   const restart = vi.fn(async () => {});
   const controls = {
-    profile: 'claude',
+    profile: 'zcode',
     profileConfig,
     ownerRefreshState: 'ok',
     async refreshOwner() {},

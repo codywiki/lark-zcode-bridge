@@ -1,11 +1,14 @@
 import { mkdir, realpath } from 'node:fs/promises';
-import { join } from 'node:path';
-import { KIMI_DEFAULT_MODEL } from '../agent/kimi/models';
 import { AgentPreflightError } from '../agent/preflight';
-import { createDefaultProfileConfig, type AgentKind, type ProfileConfig } from '../config/profile-schema';
+import {
+  createDefaultProfileConfig,
+  type AgentKind,
+  type ProfileConfig,
+  type ZcodeConfig,
+} from '../config/profile-schema';
 import type { AppConfig } from '../config/schema';
 import { resolveWorkingDirectory } from '../policy/workspace';
-import { resolveExecutablePath } from './agent-detection';
+import { defaultZcodeRuntimePath, resolveZcodeRuntimePath } from './agent-detection';
 
 export interface BootstrapProfileInput {
   agentKind: AgentKind;
@@ -14,8 +17,7 @@ export interface BootstrapProfileInput {
   secrets?: AppConfig['secrets'];
   workspace?: string;
   defaultWorkspace?: string;
-  codexBinaryPath?: string;
-  kimiBinaryPath?: string;
+  zcodeRuntimePath?: string;
   profileDir?: string;
 }
 
@@ -27,30 +29,19 @@ export async function createBootstrapProfileConfig(
     : input.defaultWorkspace
       ? await ensureManagedDefaultWorkspace(input.defaultWorkspace)
       : undefined;
-  const codex =
-    input.agentKind === 'codex'
-      ? await createBootstrapCodexConfig(input.codexBinaryPath)
-      : undefined;
-  const kimi =
-    input.agentKind === 'kimi'
-      ? await createBootstrapKimiConfig(input.kimiBinaryPath)
-      : undefined;
+  const zcode = await createBootstrapZcodeConfig(input.zcodeRuntimePath);
   const profile = createDefaultProfileConfig({
     agentKind: input.agentKind,
     accounts: input.accounts,
     preferences: input.preferences,
     secrets: input.secrets,
-    ...(codex ? { codex } : {}),
-    ...(kimi ? { kimi } : {}),
+    zcode,
   });
   if (workspace) {
     profile.workspaces = {
       ...profile.workspaces,
       default: workspace,
     };
-  }
-  if (input.profileDir && profile.codex?.inheritCodexHome === false) {
-    await mkdir(join(input.profileDir, 'codex-home'), { recursive: true });
   }
   return profile;
 }
@@ -66,50 +57,31 @@ async function ensureManagedDefaultWorkspace(path: string): Promise<string> {
   return realpath(path);
 }
 
-export async function createBootstrapCodexConfig(binaryPath: string | undefined) {
-  return createBootstrapAgentBinaryConfig({
-    agentId: 'codex',
-    agentName: 'Codex CLI',
-    command: binaryPath ?? process.env.LARK_CHANNEL_CODEX_BIN ?? 'codex',
-  });
-}
-
-export async function createBootstrapKimiConfig(binaryPath: string | undefined) {
-  const binary = await createBootstrapAgentBinaryConfig({
-    agentId: 'kimi',
-    agentName: 'Kimi Code CLI',
-    command: binaryPath ?? process.env.LARK_CHANNEL_KIMI_BIN ?? 'kimi',
-  });
-  return {
-    ...binary,
-    defaultModel: KIMI_DEFAULT_MODEL,
-  };
-}
-
-async function createBootstrapAgentBinaryConfig(input: {
-  agentId: 'codex' | 'kimi';
-  agentName: string;
-  command: string;
-}) {
-  const { agentId, agentName, command } = input;
-  let resolvedBinary: string;
+/**
+ * The ZCode runtime is the bundled `zcode.cjs` inside ZCode.app; bootstrap
+ * only verifies the file is readable (no PATH resolution — it is not a $PATH
+ * binary) so a missing ZCode install fails fast at profile creation.
+ */
+export async function createBootstrapZcodeConfig(
+  runtimePath: string | undefined,
+): Promise<ZcodeConfig> {
+  const command = runtimePath ?? defaultZcodeRuntimePath();
   try {
-    resolvedBinary = await resolveExecutablePath(command);
+    return { runtimePath: await resolveZcodeRuntimePath(command) };
   } catch (err) {
     const errno = (err as NodeJS.ErrnoException).code;
     throw new AgentPreflightError({
-      code: bootstrapBinaryErrorCode(errno),
-      agentId,
-      agentName,
-      command,
+      code: bootstrapRuntimeErrorCode(errno),
+      agentId: 'zcode',
+      agentName: 'ZCode CLI',
+      command: 'zcode',
       binaryPath: command,
       errno,
     });
   }
-  return { binaryPath: resolvedBinary };
 }
 
-function bootstrapBinaryErrorCode(errno: string | undefined) {
+function bootstrapRuntimeErrorCode(errno: string | undefined) {
   if (errno === 'EACCES' || errno === 'EPERM') return 'agent-binary-not-executable';
   if (errno === 'ELOOP' || errno === 'ENOTDIR' || errno === 'EINVAL') {
     return 'agent-binary-resolve-failed';

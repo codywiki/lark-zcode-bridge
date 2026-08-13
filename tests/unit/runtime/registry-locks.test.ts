@@ -43,7 +43,7 @@ describe('registry and runtime lock integration', () => {
       appId: 'cli_new',
       tenant: 'feishu',
       profileName: 'codex-dev',
-      agentKind: 'codex',
+      agentKind: 'zcode',
       configPath: join(root, 'config.json'),
       version: '0.1.32',
       registryFile,
@@ -54,7 +54,7 @@ describe('registry and runtime lock integration', () => {
     expect(persisted.entries[0]).toMatchObject({
       appId: 'cli_new',
       profileName: 'codex-dev',
-      agentKind: 'codex',
+      agentKind: 'zcode',
       pid: process.pid,
     });
   });
@@ -67,17 +67,17 @@ describe('registry and runtime lock integration', () => {
       pid: process.pid,
       profileName: 'claude',
       appId: 'cli_existing',
-      agentKind: 'claude',
+      agentKind: 'zcode',
     });
     await writeJson(registryFile, { entries: [lockedEntry] });
 
     const lockedPaths = resolveAppPaths({ rootDir: root, profile: 'claude' });
-    await withProfileAndAppLocks(lockedPaths, 'cli_existing', 'claude', async () => {
+    await withProfileAndAppLocks(lockedPaths, 'cli_existing', 'zcode', async () => {
       const registered = await register({
         appId: 'cli_new',
         tenant: 'feishu',
         profileName: 'codex-dev',
-        agentKind: 'codex',
+        agentKind: 'zcode',
         configPath: join(root, 'config.json'),
         version: '0.1.32',
         registryFile,
@@ -98,18 +98,18 @@ describe('registry and runtime lock integration', () => {
           pid: 999_999_992,
           profileName: 'claude',
           appId: 'cli_existing',
-          agentKind: 'claude',
+          agentKind: 'zcode',
         }),
       ],
     });
 
     const lockedPaths = resolveAppPaths({ rootDir: root, profile: 'claude' });
-    await withProfileAndAppLocks(lockedPaths, 'cli_existing', 'claude', async () => {
+    await withProfileAndAppLocks(lockedPaths, 'cli_existing', 'zcode', async () => {
       const registered = await register({
         appId: 'cli_new',
         tenant: 'feishu',
         profileName: 'codex-dev',
-        agentKind: 'codex',
+        agentKind: 'zcode',
         configPath: join(root, 'config.json'),
         version: '0.1.32',
         registryFile,
@@ -130,13 +130,13 @@ describe('registry and runtime lock integration', () => {
           pid: 999_999_992,
           profileName: 'claude',
           appId: 'cli_existing',
-          agentKind: 'claude',
+          agentKind: 'zcode',
         }),
       ],
     });
 
     const lockedPaths = resolveAppPaths({ rootDir: root, profile: 'claude' });
-    await withProfileAndAppLocks(lockedPaths, 'cli_existing', 'claude', async () => {
+    await withProfileAndAppLocks(lockedPaths, 'cli_existing', 'zcode', async () => {
       await expect(sameAppLiveOthers('cli_existing', process.pid, registryFile)).resolves.toEqual([]);
     });
   });
@@ -156,7 +156,7 @@ describe('registry and runtime lock integration', () => {
       appId: 'cli_new',
       tenant: 'feishu',
       profileName: 'codex-dev',
-      agentKind: 'codex',
+      agentKind: 'zcode',
       configPath: join(root, 'config.json'),
       version: '0.1.32',
       registryFile,
@@ -186,12 +186,12 @@ describe('registry and runtime lock integration', () => {
       pid: process.pid,
       profileName: 'claude',
       appId: 'cli_existing',
-      agentKind: 'claude',
+      agentKind: 'zcode',
     });
     await writeJson(registryFile, { entries: [lockedEntry] });
 
     const lockedPaths = resolveAppPaths({ rootDir: root, profile: 'claude' });
-    await withProfileAndAppLocks(lockedPaths, 'cli_existing', 'claude', async () => {
+    await withProfileAndAppLocks(lockedPaths, 'cli_existing', 'zcode', async () => {
       await writeFile(runtimeLockMetaFile(lockedPaths.profileLockFile), 'not json', 'utf8');
 
       await expect(
@@ -199,7 +199,7 @@ describe('registry and runtime lock integration', () => {
           appId: 'cli_new',
           tenant: 'feishu',
           profileName: 'codex-dev',
-          agentKind: 'codex',
+          agentKind: 'zcode',
           configPath: join(root, 'config.json'),
           version: '0.1.32',
           registryFile,
@@ -233,7 +233,7 @@ function entry(overrides: Partial<ProcessEntry>): ProcessEntry {
     startedAt: new Date().toISOString(),
     version: '0.1.32',
     profileName: 'claude',
-    agentKind: 'claude',
+    agentKind: 'zcode',
     ...overrides,
   };
 }

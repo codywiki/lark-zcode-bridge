@@ -12,9 +12,8 @@ import { resolveAppPaths } from './app-paths';
 import {
   createDefaultProfileConfig,
   type AgentKind,
-  type CodexConfig,
-  type KimiConfig,
   type RootConfig,
+  type ZcodeConfig,
 } from './profile-schema';
 import { markPermissionDefaultsMigration, saveRootConfig } from './profile-store';
 import type { AppConfig } from './schema';
@@ -27,8 +26,7 @@ export interface MigrateV2Options {
   configFile?: string;
   workspace?: string;
   agentKind?: AgentKind;
-  codex?: CodexConfig;
-  kimi?: KimiConfig;
+  zcode?: ZcodeConfig;
 }
 
 export interface MigrateV2Result {
@@ -121,7 +119,7 @@ export async function migrateV1ToV2(opts: MigrateV2Options = {}): Promise<Migrat
   const legacyDefaultWorkspace = opts.workspace
     ? await resolveBootstrapWorkspace(opts.workspace)
     : await collectLegacyDefaultWorkspace(paths.rootDir);
-  const agentKind = opts.agentKind ?? 'claude';
+  const agentKind: AgentKind = opts.agentKind ?? 'zcode';
   const profileConfig = createDefaultProfileConfig({
     agentKind,
     accounts: { app },
@@ -130,8 +128,7 @@ export async function migrateV1ToV2(opts: MigrateV2Options = {}): Promise<Migrat
       ...legacy.preferences?.access,
       requireMentionInGroup: legacy.preferences?.requireMentionInGroup,
     },
-    ...(agentKind === 'codex' && opts.codex ? { codex: opts.codex } : {}),
-    ...(agentKind === 'kimi' && opts.kimi ? { kimi: opts.kimi } : {}),
+    ...(opts.zcode ? { zcode: opts.zcode } : {}),
   });
   if (legacyDefaultWorkspace) {
     profileConfig.workspaces = {
@@ -203,11 +200,7 @@ function activeProcessFromRegistryEntry(entry: RegistryEntry): ActiveBridgeMigra
   if (typeof entry.appId === 'string') active.appId = entry.appId;
   if (typeof entry.tenant === 'string') active.tenant = entry.tenant;
   if (typeof entry.profileName === 'string') active.profileName = entry.profileName;
-  if (
-    entry.agentKind === 'claude' ||
-    entry.agentKind === 'codex' ||
-    entry.agentKind === 'kimi'
-  ) {
+  if (entry.agentKind === 'zcode') {
     active.agentKind = entry.agentKind;
   }
   if (typeof entry.configPath === 'string') active.configPath = entry.configPath;

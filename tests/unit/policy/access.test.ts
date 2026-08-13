@@ -119,7 +119,7 @@ describe('access policy', () => {
 
 function profileWithAccess(access: Partial<ProfileConfig['access']> = {}): ProfileConfig {
   return createDefaultProfileConfig({
-    agentKind: 'claude',
+    agentKind: 'zcode',
     accounts: {
       app: {
         id: 'cli_test',
@@ -127,6 +127,7 @@ function profileWithAccess(access: Partial<ProfileConfig['access']> = {}): Profi
         tenant: 'feishu',
       },
     },
+    zcode: { runtimePath: '/opt/zcode/zcode.cjs' },
     access,
   });
 }

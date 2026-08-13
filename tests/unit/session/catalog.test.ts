@@ -18,20 +18,20 @@ describe('agent-aware session catalog', () => {
     expect(
       sessionCatalogKey({
         scopeId: 'chat-1',
-        agentId: 'claude',
+        agentId: 'zcode',
         cwdRealpath: '/repo',
         policyFingerprint: 'fp-1',
       }),
-    ).toBe('chat-1\x1fclaude\x1f/repo\x1ffp-1');
+    ).toBe('chat-1\x1fzcode\x1f/repo\x1ffp-1');
   });
 
-  it('stores Claude/Kimi sessions and Codex threads in isolated active entries', async () => {
+  it('stores ZCode sessions in isolated active entries per cwd/fingerprint', async () => {
     const catalogPath = await path();
     const catalog = new SessionCatalog(catalogPath);
 
     catalog.upsertActive({
       scopeId: 'chat-1',
-      agentId: 'claude',
+      agentId: 'zcode',
       cwdRealpath: '/repo',
       policyFingerprint: 'fp-1',
       sessionId: 'sess-1',
@@ -39,45 +39,45 @@ describe('agent-aware session catalog', () => {
     });
     catalog.upsertActive({
       scopeId: 'chat-1',
-      agentId: 'codex',
+      agentId: 'zcode',
       cwdRealpath: '/repo',
-      policyFingerprint: 'fp-1',
-      threadId: 'thread-1',
+      policyFingerprint: 'fp-2',
+      sessionId: 'sess-2',
       now: 2000,
     });
     catalog.upsertActive({
-      scopeId: 'chat-1',
-      agentId: 'kimi',
+      scopeId: 'chat-2',
+      agentId: 'zcode',
       cwdRealpath: '/repo',
       policyFingerprint: 'fp-1',
-      sessionId: 'kimi-session-1',
+      sessionId: 'sess-3',
       now: 3000,
     });
 
     expect(
       catalog.activeFor({
         scopeId: 'chat-1',
-        agentId: 'claude',
+        agentId: 'zcode',
         cwdRealpath: '/repo',
         policyFingerprint: 'fp-1',
       }),
-    ).toMatchObject({ sessionId: 'sess-1', agentId: 'claude' });
+    ).toMatchObject({ sessionId: 'sess-1', agentId: 'zcode' });
     expect(
       catalog.activeFor({
         scopeId: 'chat-1',
-        agentId: 'codex',
+        agentId: 'zcode',
         cwdRealpath: '/repo',
-        policyFingerprint: 'fp-1',
+        policyFingerprint: 'fp-2',
       }),
-    ).toMatchObject({ threadId: 'thread-1', agentId: 'codex' });
+    ).toMatchObject({ sessionId: 'sess-2', agentId: 'zcode' });
     expect(
       catalog.activeFor({
-        scopeId: 'chat-1',
-        agentId: 'kimi',
+        scopeId: 'chat-2',
+        agentId: 'zcode',
         cwdRealpath: '/repo',
         policyFingerprint: 'fp-1',
       }),
-    ).toMatchObject({ sessionId: 'kimi-session-1', agentId: 'kimi' });
+    ).toMatchObject({ sessionId: 'sess-3', agentId: 'zcode' });
     await catalog.flush();
 
     const reloaded = new SessionCatalog(catalogPath);
@@ -85,60 +85,51 @@ describe('agent-aware session catalog', () => {
     expect(
       reloaded.activeFor({
         scopeId: 'chat-1',
-        agentId: 'kimi',
+        agentId: 'zcode',
         cwdRealpath: '/repo',
         policyFingerprint: 'fp-1',
       }),
-    ).toMatchObject({ sessionId: 'kimi-session-1', agentId: 'kimi' });
+    ).toMatchObject({ sessionId: 'sess-1', agentId: 'zcode' });
   });
 
-  it('rejects mismatched Claude/Kimi/Codex identity fields and does not auto-resume damaged entries', async () => {
+  it('rejects mismatched ZCode identity fields and does not auto-resume damaged entries', async () => {
     const catalog = new SessionCatalog(await path());
 
     expect(() =>
       catalog.upsertActive({
         scopeId: 'chat-1',
-        agentId: 'claude',
+        agentId: 'zcode',
         cwdRealpath: '/repo',
         policyFingerprint: 'fp-1',
-        threadId: 'thread-wrong',
         now: 1000,
       }),
-    ).toThrow(/Claude.*sessionId/i);
+    ).toThrow(/require sessionId/i);
     expect(() =>
       catalog.upsertActive({
         scopeId: 'chat-1',
-        agentId: 'codex',
+        agentId: 'zcode',
         cwdRealpath: '/repo',
         policyFingerprint: 'fp-1',
-        sessionId: 'sess-wrong',
-        now: 1000,
-      }),
-    ).toThrow(/Codex.*threadId/i);
-    expect(() =>
-      catalog.upsertActive({
-        scopeId: 'chat-1',
-        agentId: 'kimi',
-        cwdRealpath: '/repo',
-        policyFingerprint: 'fp-1',
+        sessionId: 'sess-1',
         threadId: 'thread-wrong',
         now: 1000,
       }),
-    ).toThrow(/Kimi.*sessionId/i);
+    ).toThrow(/must not include threadId/i);
 
     await catalog.replaceForTest([
       {
         key: sessionCatalogKey({
           scopeId: 'chat-1',
-          agentId: 'codex',
+          agentId: 'zcode',
           cwdRealpath: '/repo',
           policyFingerprint: 'fp-1',
         }),
         scopeId: 'chat-1',
-        agentId: 'codex',
+        agentId: 'zcode',
         cwdRealpath: '/repo',
         policyFingerprint: 'fp-1',
         sessionId: 'sess-damaged',
+        threadId: 'thread-damaged',
         status: 'active',
         updatedAt: 1000,
       },
@@ -147,7 +138,7 @@ describe('agent-aware session catalog', () => {
     expect(
       catalog.activeFor({
         scopeId: 'chat-1',
-        agentId: 'codex',
+        agentId: 'zcode',
         cwdRealpath: '/repo',
         policyFingerprint: 'fp-1',
       }),
@@ -155,56 +146,82 @@ describe('agent-aware session catalog', () => {
     await catalog.flush();
   });
 
-  it('isolates Kimi sessions between topic-thread scopes', async () => {
+  it('isolates ZCode sessions between topic-thread scopes', async () => {
     const catalog = new SessionCatalog(await path());
     const base = {
-      agentId: 'kimi' as const,
+      agentId: 'zcode' as const,
       cwdRealpath: '/repo',
       policyFingerprint: 'fp-1',
     };
     catalog.upsertActive({
       ...base,
       scopeId: 'oc_group:omt_topic_a',
-      sessionId: 'kimi-session-a',
+      sessionId: 'zcode-session-a',
       now: 1000,
     });
     catalog.upsertActive({
       ...base,
       scopeId: 'oc_group:omt_topic_b',
-      sessionId: 'kimi-session-b',
+      sessionId: 'zcode-session-b',
       now: 2000,
     });
 
     expect(catalog.activeFor({ ...base, scopeId: 'oc_group:omt_topic_a' })).toMatchObject({
-      sessionId: 'kimi-session-a',
+      sessionId: 'zcode-session-a',
     });
     expect(catalog.activeFor({ ...base, scopeId: 'oc_group:omt_topic_b' })).toMatchObject({
-      sessionId: 'kimi-session-b',
+      sessionId: 'zcode-session-b',
     });
     expect(catalog.activeFor({ ...base, scopeId: 'oc_group' })).toBeUndefined();
     await catalog.flush();
   });
 
-  it('archives only the current agent/cwd/fingerprint entry for a new conversation', async () => {
+  it('archives only the current cwd/fingerprint entry for a new conversation', async () => {
     const catalog = new SessionCatalog(await path());
     const base = {
       scopeId: 'chat-1',
+      agentId: 'zcode' as const,
+    };
+    catalog.upsertActive({
+      ...base,
       cwdRealpath: '/repo',
       policyFingerprint: 'fp-1',
-    };
-    catalog.upsertActive({ ...base, agentId: 'claude', sessionId: 'sess-1', now: 1000 });
-    catalog.upsertActive({ ...base, agentId: 'codex', threadId: 'thread-1', now: 1000 });
-    catalog.upsertActive({ ...base, agentId: 'kimi', sessionId: 'kimi-session-1', now: 1000 });
-
-    expect(catalog.archiveActive({ ...base, agentId: 'claude', now: 2000 })).toBe(true);
-
-    expect(catalog.activeFor({ ...base, agentId: 'claude' })).toBeUndefined();
-    expect(catalog.activeFor({ ...base, agentId: 'codex' })).toMatchObject({
-      threadId: 'thread-1',
+      sessionId: 'sess-1',
+      now: 1000,
     });
-    expect(catalog.activeFor({ ...base, agentId: 'kimi' })).toMatchObject({
-      sessionId: 'kimi-session-1',
+    catalog.upsertActive({
+      ...base,
+      cwdRealpath: '/repo-other',
+      policyFingerprint: 'fp-1',
+      sessionId: 'sess-2',
+      now: 1000,
     });
+    catalog.upsertActive({
+      ...base,
+      cwdRealpath: '/repo',
+      policyFingerprint: 'fp-2',
+      sessionId: 'sess-3',
+      now: 1000,
+    });
+
+    expect(
+      catalog.archiveActive({
+        ...base,
+        cwdRealpath: '/repo',
+        policyFingerprint: 'fp-1',
+        now: 2000,
+      }),
+    ).toBe(true);
+
+    expect(
+      catalog.activeFor({ ...base, cwdRealpath: '/repo', policyFingerprint: 'fp-1' }),
+    ).toBeUndefined();
+    expect(
+      catalog.activeFor({ ...base, cwdRealpath: '/repo-other', policyFingerprint: 'fp-1' }),
+    ).toMatchObject({ sessionId: 'sess-2' });
+    expect(
+      catalog.activeFor({ ...base, cwdRealpath: '/repo', policyFingerprint: 'fp-2' }),
+    ).toMatchObject({ sessionId: 'sess-3' });
     expect(catalog.entries().filter((entry) => entry.status === 'archived')).toHaveLength(1);
     await catalog.flush();
   });
@@ -252,7 +269,7 @@ function entry(
 ) {
   const identity = {
     scopeId,
-    agentId: 'claude' as const,
+    agentId: 'zcode' as const,
     cwdRealpath: '/repo',
     policyFingerprint,
   };

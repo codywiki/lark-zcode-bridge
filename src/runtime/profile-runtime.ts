@@ -1,13 +1,10 @@
 import { mkdir, readFile, realpath } from 'node:fs/promises';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
-import * as p from '@clack/prompts';
+import { dirname } from 'node:path';
 import { runRegistrationWizard } from '../bot/wizard';
-import { KIMI_DEFAULT_MODEL } from '../agent/kimi/models';
-import { detectInstalledAgents, type DetectedAgent } from '../cli/agent-detection';
+import { defaultZcodeRuntimePath, detectInstalledAgents } from '../cli/agent-detection';
 import {
-  createBootstrapCodexConfig,
-  createBootstrapKimiConfig,
   createBootstrapProfileConfig,
+  createBootstrapZcodeConfig,
   resolveBootstrapWorkspace,
 } from '../cli/profile-bootstrap';
 import { promptPassword } from '../cli/prompt';
@@ -48,7 +45,6 @@ import {
   saveConfig,
 } from '../config/store';
 import { log } from '../core/logger';
-import { allowedWorkspaceRoots, resolveWorkingDirectory } from '../policy/workspace';
 import {
   hasLegacyLarkCliSourceOverlay,
   recoverLegacyLarkCliSourceOverlay,
@@ -64,7 +60,6 @@ export interface ResolveProfileRuntimeOptions {
   appSecret?: string;
   tenant?: string;
   allowBootstrap?: boolean;
-  selectAgent?: (detected: DetectedAgent[]) => AgentKind | undefined | Promise<AgentKind | undefined>;
   handleActiveBridgeMigrationConflict?: (
     err: ActiveBridgeMigrationConflictError,
   ) => boolean | Promise<boolean>;
@@ -90,17 +85,7 @@ export function createRuntimeProfileConfig(
 ): ProfileConfig {
   return createDefaultProfileConfig({
     ...input,
-    ...(input.agentKind === 'codex'
-      ? { codex: input.codex ?? { binaryPath: process.env.LARK_CHANNEL_CODEX_BIN ?? 'codex' } }
-      : {}),
-    ...(input.agentKind === 'kimi'
-      ? {
-          kimi: input.kimi ?? {
-            binaryPath: process.env.LARK_CHANNEL_KIMI_BIN ?? 'kimi',
-            defaultModel: KIMI_DEFAULT_MODEL,
-          },
-        }
-      : {}),
+    zcode: input.zcode ?? { runtimePath: defaultZcodeRuntimePath() },
   });
 }
 
@@ -119,39 +104,26 @@ export async function resolveProfileRuntime(
   if (!profile && opts.allowBootstrap) {
     const detected = await detectInstalledAgents();
     if (detected.length === 0) {
-      throw new Error('no supported local agent found; install claude, codex, or kimi first');
+      throw new Error('no supported local agent found; install the ZCode desktop app first');
     }
-    if (detected.length > 1) {
-      const selected = await selectDetectedAgent(detected, opts.selectAgent);
-      if (!selected) {
-        throw new Error(formatAmbiguousAgentSelectionError(detected));
-      }
-      profile = selected;
-    } else {
-      profile = detected[0]?.kind;
-    }
+    profile = detected[0]?.kind;
   }
   if (!profile && !opts.allowBootstrap) {
     throw new Error('active profile is required');
   }
-  profile ??= 'claude';
+  profile ??= 'zcode';
   let appPaths = resolveAppPaths({ rootDir, profile });
   const configPath = opts.config ?? appPaths.configFile;
 
-  const migrationAgent = resolveBootstrapAgent(requestedAgent, profile);
+  const migrationAgent = requestedAgent ?? 'zcode';
   const needsMigration = await hasLegacyConfig(configPath);
   await migrateV1ToV2WithActiveBridgeHandling({
     rootDir: appPaths.rootDir,
     profile: appPaths.profile,
     configFile: configPath,
     workspace: opts.workspace,
-    ...(migrationAgent ? { agentKind: migrationAgent } : {}),
-    ...(needsMigration && migrationAgent === 'codex'
-      ? { codex: await createBootstrapCodexConfig(undefined) }
-      : {}),
-    ...(needsMigration && migrationAgent === 'kimi'
-      ? { kimi: await createBootstrapKimiConfig(undefined) }
-      : {}),
+    agentKind: migrationAgent,
+    ...(needsMigration ? { zcode: await createBootstrapZcodeConfig(undefined) } : {}),
   }, opts.handleActiveBridgeMigrationConflict);
 
   let rootConfig = await loadRootConfig(configPath);
@@ -160,13 +132,12 @@ export async function resolveProfileRuntime(
       profile = rootConfig.activeProfile;
       appPaths = resolveAppPaths({ rootDir, profile });
     }
-    let profileConfig = rootConfig.profiles[profile];
+    const profileConfig = rootConfig.profiles[profile];
     if (!profileConfig) {
       if (opts.allowBootstrap && explicitProfile) {
         return bootstrapProfileIntoExistingRoot({
           rootConfig,
           profile,
-          requestedAgent,
           opts,
           appPaths,
           configPath,
@@ -183,33 +154,17 @@ export async function resolveProfileRuntime(
     if (defaultWorkspaceUpgrade.changed) {
       rootConfig = defaultWorkspaceUpgrade.rootConfig;
     }
-    const workspaceRootsUpgrade = await ensureCanonicalKimiWorkspaceRoots(
-      rootConfig,
-      profile,
-      appPaths,
-    );
-    if (workspaceRootsUpgrade.changed) {
-      rootConfig = workspaceRootsUpgrade.rootConfig;
-    }
-    if (
-      runtimeUpgrade.changed ||
-      defaultWorkspaceUpgrade.changed ||
-      workspaceRootsUpgrade.changed
-    ) {
+    if (runtimeUpgrade.changed || defaultWorkspaceUpgrade.changed) {
       await saveRootConfig(rootConfig, configPath);
-      profileConfig = rootConfig.profiles[profile]!;
       log.info('profile', 'legacy-runtime-defaults-upgraded', {
         profile,
         permissions: runtimeUpgrade.permissions,
-        codex: runtimeUpgrade.codex,
-        kimi: runtimeUpgrade.kimi,
         workspace: defaultWorkspaceUpgrade.changed,
-        workspaceRoots: workspaceRootsUpgrade.changed,
       });
     }
-    assertBootstrapAppMatchesExistingProfile(opts, profile, profileConfig);
+    assertBootstrapAppMatchesExistingProfile(opts, profile, rootConfig.profiles[profile]!);
     const cfg = await maybeMigrateRootPlaintextSecret(rootConfig, profile, appPaths, configPath);
-    return { cfg, profileConfig, configPath, appPaths, profile };
+    return { cfg, profileConfig: rootConfig.profiles[profile]!, configPath, appPaths, profile };
   }
 
   const existing = await loadConfig(configPath);
@@ -217,14 +172,13 @@ export async function resolveProfileRuntime(
     assertBootstrapAppMatchesExistingConfig(opts, profile, existing);
     const cfg = await maybeMigratePlaintextSecret(existing, configPath, appPaths);
     const profileConfig = createRuntimeProfileConfig({
-      agentKind: requestedAgent ?? 'claude',
+      agentKind: 'zcode',
       accounts: cfg.accounts,
       preferences: cfg.preferences,
       secrets: cfg.secrets,
     });
     profileConfig.workspaces.default = await resolveConvertedLegacyDefaultWorkspace(opts, appPaths);
-    const createdRoot = createRootConfig(profile, profileConfig, cfg.secrets);
-    const root = (await ensureCanonicalKimiWorkspaceRoots(createdRoot, profile, appPaths)).rootConfig;
+    const root = createRootConfig(profile, profileConfig, cfg.secrets);
     await saveRootConfig(root, configPath);
     await writeActiveProfile(appPaths.rootDir, profile);
     return {
@@ -239,12 +193,11 @@ export async function resolveProfileRuntime(
   if (!opts.allowBootstrap) {
     throw new Error('config not initialized');
   }
-  const bootstrapAgent = resolveBootstrapAgent(requestedAgent, profile) ?? 'claude';
   const workspace = opts.workspace;
   const fresh = await resolveBootstrapAppConfig(opts);
   const encrypted = await encryptedConfigForProfile(fresh, appPaths);
   const profileConfig = await createBootstrapProfileConfig({
-    agentKind: bootstrapAgent,
+    agentKind: 'zcode',
     accounts: encrypted.accounts,
     preferences: encrypted.preferences,
     secrets: encrypted.secrets,
@@ -252,8 +205,7 @@ export async function resolveProfileRuntime(
     defaultWorkspace: appPaths.defaultWorkspaceDir,
     profileDir: appPaths.profileDir,
   });
-  const createdRoot = createRootConfig(profile, profileConfig, encrypted.secrets);
-  const root = (await ensureCanonicalKimiWorkspaceRoots(createdRoot, profile, appPaths)).rootConfig;
+  const root = createRootConfig(profile, profileConfig, encrypted.secrets);
   await saveRootConfig(root, configPath);
   await writeActiveProfile(appPaths.rootDir, profile);
   console.log(`配置已保存到 ${configPath}\n`);
@@ -269,18 +221,16 @@ export async function resolveProfileRuntime(
 async function bootstrapProfileIntoExistingRoot(args: {
   rootConfig: RootConfig;
   profile: string;
-  requestedAgent: AgentKind | undefined;
   opts: ResolveProfileRuntimeOptions;
   appPaths: AppPaths;
   configPath: string;
 }): Promise<ProfileRuntime> {
-  const { rootConfig, profile, requestedAgent, opts, appPaths, configPath } = args;
-  const bootstrapAgent = resolveBootstrapAgent(requestedAgent, profile) ?? 'claude';
+  const { rootConfig, profile, opts, appPaths, configPath } = args;
   const workspace = opts.workspace;
   const fresh = await resolveBootstrapAppConfig(opts);
   const encrypted = await encryptedConfigForProfile(fresh, appPaths);
   const profileConfig = await createBootstrapProfileConfig({
-    agentKind: bootstrapAgent,
+    agentKind: 'zcode',
     accounts: encrypted.accounts,
     preferences: encrypted.preferences,
     secrets: encrypted.secrets,
@@ -301,10 +251,7 @@ async function bootstrapProfileIntoExistingRoot(args: {
       },
     },
   };
-  const canonicalRoot = (
-    await ensureCanonicalKimiWorkspaceRoots(nextRoot, profile, appPaths)
-  ).rootConfig;
-  const storedRoot = markPermissionDefaultsMigration(canonicalRoot, profile);
+  const storedRoot = markPermissionDefaultsMigration(nextRoot, profile);
   await saveRootConfig(storedRoot, configPath);
   console.log(`配置已保存到 ${configPath}\n`);
   return {
@@ -319,72 +266,26 @@ async function bootstrapProfileIntoExistingRoot(args: {
 function upgradeLegacyRuntimeDefaults(
   rootConfig: RootConfig,
   profile: string,
-): { rootConfig: RootConfig; changed: boolean; permissions: boolean; codex: boolean; kimi: boolean } {
+): { rootConfig: RootConfig; changed: boolean; permissions: boolean } {
   const profileConfig = rootConfig.profiles[profile];
   if (!profileConfig) {
-    return { rootConfig, changed: false, permissions: false, codex: false, kimi: false };
+    return { rootConfig, changed: false, permissions: false };
   }
 
   const permissionDefaultsMigrated = hasPermissionDefaultsMigration(rootConfig, profile);
-  const shouldUpgradeClaudeDefaultPermissions =
-    !permissionDefaultsMigrated &&
-    profileConfig.agentKind === 'claude' &&
-    !profileConfig.permissions.claude?.permissionMode &&
-    profileConfig.permissions.defaultAccess === 'workspace' &&
-    profileConfig.permissions.maxAccess === 'workspace';
   const legacySandboxPolicy = profileConfig.permissionSource === 'sandbox';
-  const nextPermissions = shouldUpgradeClaudeDefaultPermissions
-    ? { defaultAccess: 'full' as const, maxAccess: 'full' as const }
-    : profileConfig.permissions;
-  const legacyCodexDefaults = profileConfig.permissionSource !== 'permissions';
-  const legacyIsolatedCodexHome =
-    legacyCodexDefaults &&
-    profileConfig.agentKind === 'codex' &&
-    Boolean(profileConfig.codex) &&
-    !profileConfig.codex?.codexHome &&
-    profileConfig.codex?.inheritCodexHome === false;
-  const legacyIgnoredUserConfig =
-    legacyCodexDefaults &&
-    profileConfig.agentKind === 'codex' &&
-    Boolean(profileConfig.codex) &&
-    !profileConfig.codex?.codexHome &&
-    profileConfig.codex?.ignoreUserConfig === true;
-  const legacyKimiDefaultModel =
-    profileConfig.agentKind === 'kimi' &&
-    Boolean(profileConfig.kimi) &&
-    !profileConfig.kimi?.defaultModel;
-  const permissionsChanged = legacySandboxPolicy || shouldUpgradeClaudeDefaultPermissions;
+  const permissionsChanged = legacySandboxPolicy;
   const permissionDefaultsMarkerChanged = !permissionDefaultsMigrated;
-  const codexChanged = legacyIsolatedCodexHome || legacyIgnoredUserConfig;
-  const kimiChanged = legacyKimiDefaultModel;
-  if (!permissionsChanged && !codexChanged && !kimiChanged && !permissionDefaultsMarkerChanged) {
-    return { rootConfig, changed: false, permissions: false, codex: false, kimi: false };
+  if (!permissionsChanged && !permissionDefaultsMarkerChanged) {
+    return { rootConfig, changed: false, permissions: false };
   }
 
   const nextProfile: ProfileConfig = {
     ...profileConfig,
     ...(permissionsChanged
       ? {
-          permissions: nextPermissions,
           permissionSource: 'permissions' as const,
-          sandbox: permissionsToLegacySandbox(nextPermissions),
-        }
-      : {}),
-    ...(profileConfig.codex
-      ? {
-          codex: {
-            ...profileConfig.codex,
-            ...(legacyIsolatedCodexHome ? { inheritCodexHome: true } : {}),
-            ...(legacyIgnoredUserConfig ? { ignoreUserConfig: false } : {}),
-          },
-        }
-      : {}),
-    ...(profileConfig.kimi
-      ? {
-          kimi: {
-            ...profileConfig.kimi,
-            ...(legacyKimiDefaultModel ? { defaultModel: KIMI_DEFAULT_MODEL } : {}),
-          },
+          sandbox: permissionsToLegacySandbox(profileConfig.permissions),
         }
       : {}),
   };
@@ -400,8 +301,6 @@ function upgradeLegacyRuntimeDefaults(
   return {
     changed: true,
     permissions: permissionsChanged,
-    codex: codexChanged,
-    kimi: kimiChanged,
     rootConfig: permissionDefaultsMarkerChanged
       ? markPermissionDefaultsMigration(nextRoot, profile)
       : nextRoot,
@@ -440,82 +339,6 @@ async function ensureProfileDefaultWorkspace(
   };
 }
 
-async function ensureCanonicalKimiWorkspaceRoots(
-  rootConfig: RootConfig,
-  profile: string,
-  appPaths: AppPaths,
-): Promise<{ rootConfig: RootConfig; changed: boolean }> {
-  const profileConfig = rootConfig.profiles[profile];
-  if (!profileConfig || profileConfig.agentKind !== 'kimi') {
-    return { rootConfig, changed: false };
-  }
-
-  const configuredRoots = allowedWorkspaceRoots(profileConfig.workspaces);
-  if (configuredRoots.length === 0 || !profileConfig.workspaces.default) {
-    throw new Error('Kimi profile requires a default authorized workspace root');
-  }
-
-  const stateRoot = await realpath(appPaths.rootDir).catch(() => resolve(appPaths.rootDir));
-  const canonicalRoots: string[] = [];
-  const seen = new Set<string>();
-  for (const configuredRoot of configuredRoots) {
-    const resolvedRoot = await resolveWorkingDirectory(configuredRoot);
-    if (!resolvedRoot.ok) {
-      throw new Error(`Kimi workspace authorization root rejected (${resolvedRoot.reason})`);
-    }
-    if (pathsOverlap(resolvedRoot.cwdRealpath, stateRoot)) {
-      throw new Error('Kimi workspace authorization root overlaps bridge profile state');
-    }
-    if (seen.has(resolvedRoot.cwdRealpath)) continue;
-    seen.add(resolvedRoot.cwdRealpath);
-    canonicalRoots.push(resolvedRoot.cwdRealpath);
-  }
-
-  const defaultRoot = canonicalRoots[0];
-  if (!defaultRoot) {
-    throw new Error('Kimi profile requires a valid default authorized workspace root');
-  }
-  const allowedRoots = canonicalRoots.slice(1);
-  const nextWorkspaces: ProfileConfig['workspaces'] = {
-    default: defaultRoot,
-    ...(allowedRoots.length > 0 ? { allowedRoots } : {}),
-  };
-  const changed =
-    profileConfig.workspaces.default !== nextWorkspaces.default ||
-    !sameStrings(profileConfig.workspaces.allowedRoots ?? [], allowedRoots);
-  if (!changed) return { rootConfig, changed: false };
-
-  return {
-    changed: true,
-    rootConfig: {
-      ...rootConfig,
-      profiles: {
-        ...rootConfig.profiles,
-        [profile]: {
-          ...profileConfig,
-          workspaces: nextWorkspaces,
-        },
-      },
-    },
-  };
-}
-
-function pathsOverlap(left: string, right: string): boolean {
-  return containsPath(left, right) || containsPath(right, left);
-}
-
-function containsPath(root: string, candidate: string): boolean {
-  const fromRoot = relative(root, candidate);
-  return (
-    fromRoot === '' ||
-    (fromRoot !== '..' && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot))
-  );
-}
-
-function sameStrings(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-
 async function resolveConvertedLegacyDefaultWorkspace(
   opts: ResolveProfileRuntimeOptions,
   appPaths: AppPaths,
@@ -525,13 +348,6 @@ async function resolveConvertedLegacyDefaultWorkspace(
   if (legacyDefault) return legacyDefault;
   await mkdir(appPaths.defaultWorkspaceDir, { recursive: true, mode: 0o700 });
   return realpath(appPaths.defaultWorkspaceDir);
-}
-
-function resolveBootstrapAgent(
-  requestedAgent: AgentKind | undefined,
-  profile: string | undefined,
-): AgentKind | undefined {
-  return requestedAgent ?? (profile === 'codex' || profile === 'kimi' ? profile : undefined);
 }
 
 async function hasLegacyConfig(configPath: string): Promise<boolean> {
@@ -567,7 +383,7 @@ async function resolveBootstrapAppConfig(opts: ResolveProfileRuntimeOptions): Pr
     if (!isInteractiveTerminal()) {
       throw new Error(
         '当前没有配置，非交互模式无法完成扫码创建应用。' +
-          '请先在终端运行 `lark-channel-bridge run` 完成首次初始化，' +
+          '请先在终端运行 `lark-zcode-bridge run` 完成首次初始化，' +
           '或传入 --app-id 和 --app-secret。',
       );
     }
@@ -659,7 +475,7 @@ export async function materializeEnvSecretForService(
   const rootDir = opts.config ? dirname(opts.config) : undefined;
   const explicitProfile = opts.profile;
   const activeProfile = explicitProfile ?? (await readActiveProfile(rootDir));
-  let profile = activeProfile ?? 'claude';
+  let profile = activeProfile ?? 'zcode';
   let appPaths = resolveAppPaths({ rootDir, profile });
   const configPath = opts.config ?? appPaths.configFile;
 
@@ -699,65 +515,6 @@ export async function materializeEnvSecretForService(
   return true;
 }
 
-function formatAmbiguousAgentSelectionError(
-  detected: Array<{ kind: AgentKind; binaryPath: string }>,
-): string {
-  const lines = detected.map((agent) => `  - ${agent.kind}: ${agent.binaryPath}`);
-  return [
-    '检测到多个本地 agent，请使用 --agent <claude|codex|kimi> 指定要初始化哪一个。',
-    '已检测到：',
-    ...lines,
-  ].join('\n');
-}
-
-async function selectDetectedAgent(
-  detected: DetectedAgent[],
-  selector: ResolveProfileRuntimeOptions['selectAgent'],
-): Promise<AgentKind | undefined> {
-  const selected = selector
-    ? await selector(detected)
-    : await promptForDetectedAgentSelection(detected);
-  if (!selected) return undefined;
-  return detected.some((agent) => agent.kind === selected) ? selected : undefined;
-}
-
-async function promptForDetectedAgentSelection(detected: DetectedAgent[]): Promise<AgentKind | undefined> {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) return undefined;
-  p.intro('选择本地 agent');
-  const selected = await p.select<AgentKind>({
-    message: '检测到多个本地 agent，本次要初始化哪一个？',
-    options: detected.map((agent) => ({
-      value: agent.kind,
-      label: displayAgentKind(agent.kind),
-      hint: agent.binaryPath,
-    })),
-    initialValue: detected[0]?.kind,
-  });
-  if (p.isCancel(selected)) {
-    p.cancel('已取消 agent 选择。');
-    throw new UserCancelledError('已取消启动。');
-  }
-  p.outro(`已选择 ${displayAgentKind(selected)}`);
-  return selected;
-}
-
-class UserCancelledError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'UserCancelledError';
-  }
-}
-
-function displayAgentKind(kind: AgentKind): string {
-  switch (kind) {
-    case 'claude':
-      return 'Claude Code';
-    case 'codex':
-      return 'Codex CLI';
-    case 'kimi':
-      return 'Kimi Code CLI';
-  }
-}
 
 async function maybeMigrateRootPlaintextSecret(
   rootConfig: RootConfig,
@@ -835,7 +592,7 @@ async function maybeMigratePlaintextSecret(
       );
       await setSecret(secretKeyForApp(cfg.accounts.app.id), s, appPaths);
       await saveConfig(next, configPath);
-      console.log('🔒 已把 App Secret 加密迁移到 ~/.lark-channel/secrets.enc');
+      console.log('🔒 已把 App Secret 加密迁移到 profile 的 secrets.enc');
       return next;
     } catch (err) {
       log.warn('config', 'migrate-encrypted-failed', {

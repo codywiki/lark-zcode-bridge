@@ -1,11 +1,10 @@
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resolveAppPaths } from '../../../src/config/app-paths';
 import {
   createDefaultProfileConfig,
-  type AgentKind,
   type RootConfig,
 } from '../../../src/config/profile-schema';
 import {
@@ -31,14 +30,14 @@ afterEach(async () => {
 describe('profile management commands', () => {
   it('lists active profile first with running pid and agent identity', async () => {
     const root = await makeRoot();
-    await writeProfiles(root, 'codex-dev', ['alpha', 'claude', 'codex-dev']);
+    await writeProfiles(root, 'zcode-dev', ['alpha', 'beta', 'zcode-dev']);
     await writeRegistry(root, [
       processEntry({
         id: 'run1',
         pid: 12345,
-        profileName: 'codex-dev',
-        agentKind: 'codex',
-        appId: 'cli_codex',
+        profileName: 'zcode-dev',
+        agentKind: 'zcode',
+        appId: 'cli_zcode',
       }),
     ]);
     const lines: string[] = [];
@@ -49,25 +48,25 @@ describe('profile management commands', () => {
     await runProfileList({ rootDir: root });
 
     expect(lines).toEqual([
-      'ACTIVE  PROFILE    AGENT   STATUS',
-      '*       codex-dev  codex   pid=12345 agent=codex',
-      '        alpha      claude  -',
-      '        claude     claude  -',
+      'ACTIVE  PROFILE    AGENT  STATUS',
+      '*       zcode-dev  zcode  pid=12345 agent=zcode',
+      '        alpha      zcode  -',
+      '        beta       zcode  -',
     ]);
   });
 
   it('switches active profile atomically without rewriting running process entries', async () => {
     const root = await makeRoot();
-    await writeProfiles(root, 'claude', ['claude', 'codex-dev']);
+    await writeProfiles(root, 'zcode', ['zcode', 'zcode-dev']);
     const registryFile = resolveAppPaths({ rootDir: root }).userRegistryFile;
     const registry = {
       entries: [
         processEntry({
           id: 'run1',
           pid: 12345,
-          profileName: 'claude',
-          agentKind: 'claude',
-          appId: 'cli_claude',
+          profileName: 'zcode',
+          agentKind: 'zcode',
+          appId: 'cli_zcode',
         }),
       ],
     };
@@ -75,83 +74,63 @@ describe('profile management commands', () => {
     const beforeRegistry = await readFile(registryFile, 'utf8');
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    await runProfileUse('codex-dev', { rootDir: root });
+    await runProfileUse('zcode-dev', { rootDir: root });
 
     const rootConfig = JSON.parse(await readFile(join(root, 'config.json'), 'utf8')) as RootConfig;
-    await expect(readFile(join(root, 'active-profile'), 'utf8')).resolves.toBe('codex-dev\n');
-    expect(rootConfig.activeProfile).toBe('codex-dev');
+    await expect(readFile(join(root, 'active-profile'), 'utf8')).resolves.toBe('zcode-dev\n');
+    expect(rootConfig.activeProfile).toBe('zcode-dev');
     expect(await readFile(registryFile, 'utf8')).toBe(beforeRegistry);
   });
 
-  it('logs Kimi in with the selected profile home instead of the global home', async () => {
+  it('writes the ZCode API key into the selected profile home on login', async () => {
     const root = await makeRoot();
-    const profileDir = join(root, 'profiles', 'kimi');
-    const fakeBinary = join(root, 'fake-kimi.cjs');
-    const loginRecord = join(root, 'kimi-login.json');
+    const profileDir = join(root, 'profiles', 'zcode');
     await mkdir(profileDir, { recursive: true });
-    await writeFile(
-      fakeBinary,
-      `#!/usr/bin/env node
-const fs = require('node:fs');
-if (process.argv[2] === 'doctor' && process.argv[3] === 'config') process.exit(0);
-if (process.argv[2] === 'login') {
-  fs.writeFileSync(${JSON.stringify(loginRecord)}, JSON.stringify({
-    cwd: process.cwd(),
-    kimiHome: process.env.KIMI_CODE_HOME,
-    cacheDir: process.env.KIMI_CODE_CACHE_DIR,
-    tempDir: process.env.TMPDIR,
-  }));
-  process.exit(0);
-}
-process.exit(64);
-`,
-      'utf8',
-    );
-    await chmod(fakeBinary, 0o755);
     const config: RootConfig = {
       schemaVersion: 2,
-      activeProfile: 'kimi',
+      activeProfile: 'zcode',
       preferences: {},
       profiles: {
-        kimi: createDefaultProfileConfig({
-          agentKind: 'kimi',
+        zcode: createDefaultProfileConfig({
+          agentKind: 'zcode',
           accounts: {
-            app: { id: 'cli_kimi', secret: '${APP_SECRET}', tenant: 'feishu' },
+            app: { id: 'cli_zcode', secret: '${APP_SECRET}', tenant: 'feishu' },
           },
-          kimi: { binaryPath: fakeBinary },
+          zcode: { runtimePath: join(root, 'zcode.cjs') },
         }),
       },
     };
     await writeJson(join(root, 'config.json'), config);
     vi.spyOn(console, 'log').mockImplementation(() => {});
+    const previousKey = process.env.ZCODE_API_KEY;
+    process.env.ZCODE_API_KEY = 'test-zcode-api-key';
 
-    await runProfileLogin('kimi', { rootDir: root });
+    try {
+      await runProfileLogin('zcode', { rootDir: root });
+    } finally {
+      if (previousKey === undefined) {
+        delete process.env.ZCODE_API_KEY;
+      } else {
+        process.env.ZCODE_API_KEY = previousKey;
+      }
+    }
 
-    const record = JSON.parse(await readFile(loginRecord, 'utf8')) as {
-      cwd: string;
-      kimiHome: string;
-      cacheDir: string;
-      tempDir: string;
+    const zcodeHome = join(profileDir, 'zcode-home');
+    const configFile = join(zcodeHome, '.zcode', 'cli', 'config.json');
+    const written = JSON.parse(await readFile(configFile, 'utf8')) as {
+      provider: Record<string, { options?: { apiKey?: string } }>;
     };
-    const kimiHome = join(profileDir, 'kimi-home');
-    expect(record).toEqual({
-      cwd: await realpath(kimiHome),
-      kimiHome,
-      cacheDir: join(kimiHome, 'cache'),
-      tempDir: join(kimiHome, 'tmp'),
-    });
-    expect(await readFile(join(kimiHome, 'config.toml'), 'utf8')).toContain(
-      '# BEGIN LARK CHANNEL BRIDGE KIMI SAFETY',
-    );
+    expect(written.provider.bigmodel?.options?.apiKey).toBe('test-zcode-api-key');
+    // The key file must be private to the profile home owner.
+    expect((await stat(configFile)).mode & 0o777).toBe(0o600);
   });
 });
 
 async function writeProfiles(root: string, activeProfile: string, names: string[]): Promise<void> {
   const profiles: RootConfig['profiles'] = {};
   for (const name of names) {
-    const agentKind: AgentKind = name.startsWith('codex') ? 'codex' : 'claude';
     profiles[name] = createDefaultProfileConfig({
-      agentKind,
+      agentKind: 'zcode',
       accounts: {
         app: {
           id: `cli_${name.replace(/[^A-Za-z0-9]/g, '_')}`,
@@ -159,7 +138,7 @@ async function writeProfiles(root: string, activeProfile: string, names: string[
           tenant: 'feishu',
         },
       },
-      ...(agentKind === 'codex' ? { codex: { binaryPath: 'codex' } } : {}),
+      zcode: { runtimePath: join(root, 'zcode.cjs') },
     });
     await mkdir(join(root, 'profiles', name), { recursive: true });
   }
@@ -179,8 +158,8 @@ function processEntry(overrides: Partial<ProcessEntry>): ProcessEntry {
     pid: process.pid,
     appId: 'cli_test',
     tenant: 'feishu',
-    profileName: 'claude',
-    agentKind: 'claude',
+    profileName: 'zcode',
+    agentKind: 'zcode',
     configPath: '/tmp/config.json',
     startedAt: new Date().toISOString(),
     version: '0.1.32',

@@ -1,6 +1,11 @@
 import { existsSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
-import { prepareKimiProfileHome } from '../../agent/kimi/profile-home';
+import { createInterface } from 'node:readline';
+import {
+  prepareZcodeProfileHome,
+  setZcodeModelConfigApiKey,
+  ZCODE_API_KEY_ENV,
+} from '../../agent/zcode/profile-home';
 import { resolveAppPaths } from '../../config/app-paths';
 import { paths } from '../../config/paths';
 import {
@@ -19,7 +24,6 @@ import {
 import type { RootConfig } from '../../config/profile-schema';
 import { resolveAppSecret } from '../../config/secret-resolver';
 import { writeFileAtomic } from '../../platform/atomic-write';
-import { mergeProcessEnv, spawnProcess } from '../../platform/spawn';
 import { acquireProfileRuntimeLock, checkRuntimeLock } from '../../runtime/locks';
 import { readAndPrune } from '../../runtime/registry';
 import { listAllProfiles } from '../../runtime/profile-discovery';
@@ -164,8 +168,8 @@ export async function runProfileLogin(
   if (!root) throw new Error('config not initialized');
   const profile = root.profiles[name];
   if (!profile) throw new Error(`profile not found: ${name}`);
-  if (profile.agentKind !== 'kimi' || !profile.kimi?.binaryPath) {
-    throw new Error(`profile login currently supports Kimi profiles only: ${name}`);
+  if (profile.agentKind !== 'zcode' || !profile.zcode?.runtimePath) {
+    throw new Error(`profile login currently supports ZCode profiles only: ${name}`);
   }
 
   const profilePaths = resolveAppPaths({ rootDir, profile: name });
@@ -175,44 +179,32 @@ export async function runProfileLogin(
     throw new Error(`stop the running profile before login: ${name}${holder}`);
   }
 
-  const lock = await acquireProfileRuntimeLock(profilePaths, 'kimi');
+  const lock = await acquireProfileRuntimeLock(profilePaths, 'zcode');
   try {
-    const prepared = prepareKimiProfileHome(profile.kimi.binaryPath, profilePaths.profileDir);
-    console.log(`正在为 Kimi profile \`${name}\` 授权；请按终端提示完成登录。`);
-    await runInteractiveProcess(profile.kimi.binaryPath, ['login'], {
-      cwd: prepared.homeDir,
-      env: mergeProcessEnv(process.env, prepared.env),
+    const prepared = prepareZcodeProfileHome(profilePaths.profileDir, {
+      ...(profile.zcode.defaultModel ? { model: profile.zcode.defaultModel } : {}),
+      ...(profile.zcode.baseURL ? { baseURL: profile.zcode.baseURL } : {}),
     });
-    console.log(`Kimi profile \`${name}\` 已完成登录。`);
+    const fromEnv = process.env[ZCODE_API_KEY_ENV]?.trim();
+    const apiKey =
+      fromEnv ??
+      (await promptLine(
+        `请输入 ZCode API Key（只写入 profile \`${name}\` 的独立配置，不会外发）: `,
+      ));
+    if (!apiKey.trim()) throw new Error('API Key 不能为空');
+    const configFile = setZcodeModelConfigApiKey(prepared.homeDir, apiKey.trim());
+    console.log(`ZCode profile \`${name}\` 的 API Key 已写入 ${configFile}`);
   } finally {
     await lock.release().catch(() => {});
   }
 }
 
-async function runInteractiveProcess(
-  command: string,
-  args: readonly string[],
-  options: { cwd: string; env: NodeJS.ProcessEnv },
-): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const child = spawnProcess(command, args, {
-      cwd: options.cwd,
-      env: options.env,
-      stdio: 'inherit',
-    });
-    child.once('error', reject);
-    child.once('exit', (code, signal) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      reject(
-        new Error(
-          signal
-            ? `Kimi login terminated by ${signal}`
-            : `Kimi login exited with code ${String(code)}`,
-        ),
-      );
+function promptLine(question: string): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise<string>((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer);
     });
   });
 }

@@ -21,7 +21,7 @@ import { writeFileAtomic } from '../platform/atomic-write';
 import { checkRuntimeLock } from './locks';
 
 /**
- * Tracks running `lark-channel-bridge start` processes so we can:
+ * Tracks running `lark-zcode-bridge start` processes so we can:
  *   - Warn on duplicate `start` of the same app (open-platform routes events
  *     to one of N long-connections randomly, leaving users guessing).
  *   - Let users list (`ps` / `/ps`) and terminate (`stop <id>` / `/exit <id>`)
@@ -64,7 +64,14 @@ function isValidEntry(e: unknown): e is ProcessEntry {
     typeof x.appId === 'string' &&
     (x.tenant === 'feishu' || x.tenant === 'lark') &&
     typeof x.profileName === 'string' &&
-    (x.agentKind === 'claude' || x.agentKind === 'codex' || x.agentKind === 'kimi') &&
+    // 'zcode' is the only kind this fork writes. Legacy upstream kinds are
+    // still accepted when reading old registry files; they can never match a
+    // live runtime lock (lock meta only validates 'zcode'), so write paths
+    // prune them as stale.
+    (x.agentKind === 'zcode' ||
+      x.agentKind === 'claude' ||
+      x.agentKind === 'codex' ||
+      x.agentKind === 'kimi') &&
     typeof x.configPath === 'string' &&
     typeof x.startedAt === 'string' &&
     typeof x.version === 'string'
@@ -136,8 +143,8 @@ export async function register(args: RegisterArgs): Promise<ProcessEntry> {
     pid: process.pid,
     appId: args.appId,
     tenant: args.tenant,
-    profileName: args.profileName ?? 'claude',
-    agentKind: args.agentKind ?? 'claude',
+    profileName: args.profileName ?? 'zcode',
+    agentKind: args.agentKind ?? 'zcode',
     configPath: args.configPath,
     startedAt: new Date().toISOString(),
     version: args.version,

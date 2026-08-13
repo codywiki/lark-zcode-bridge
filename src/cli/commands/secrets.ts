@@ -9,14 +9,14 @@ import { promptPassword } from '../prompt';
 /**
  * `secrets` CLI surface. Two intended consumers:
  *
- * 1. Humans: `lark-channel-bridge secrets set/list/remove` to manage the
+ * 1. Humans: `lark-zcode-bridge secrets set/list/remove` to manage the
  *    encrypted keystore manually.
  *
  * 2. lark-cli (and any other tool implementing the exec-provider protocol):
- *    `lark-channel-bridge secrets get` reads a JSON-RPC request
+ *    `lark-zcode-bridge secrets get` reads a JSON-RPC request
  *    from stdin and writes the decrypted secret to stdout. This is what
  *    `accounts.app.secret = { source: "exec", ... }` resolves through when
- *    lark-cli binds against ~/.lark-channel/config.json.
+ *    lark-cli binds against ~/.lark-zcode-bridge/config.json.
  */
 
 interface ExecRequest {
@@ -86,7 +86,7 @@ export async function runSecretsSet(
   opts: SecretProfileOptions = {},
 ): Promise<void> {
   if (!appId) {
-    console.error('用法: lark-channel-bridge secrets set --app-id <id>');
+    console.error('用法: lark-zcode-bridge secrets set --app-id <id>');
     process.exit(1);
   }
   const plaintext = await promptPassword(`输入 ${appId} 的 App Secret: `);
@@ -95,7 +95,7 @@ export async function runSecretsSet(
     process.exit(1);
   }
   await setAppSecret(appId, plaintext, opts);
-  console.log(`✓ 已加密存到 ~/.lark-channel/secrets.enc`);
+  console.log(`✓ 已加密存到 ~/.lark-zcode-bridge/secrets.enc`);
 }
 
 export async function runSecretsList(opts: SecretProfileOptions = {}): Promise<void> {
@@ -116,7 +116,7 @@ export async function runSecretsRemove(
   opts: SecretProfileOptions = {},
 ): Promise<void> {
   if (!appId) {
-    console.error('用法: lark-channel-bridge secrets remove --app-id <id>');
+    console.error('用法: lark-zcode-bridge secrets remove --app-id <id>');
     process.exit(1);
   }
   const id = secretKeyForApp(appId);

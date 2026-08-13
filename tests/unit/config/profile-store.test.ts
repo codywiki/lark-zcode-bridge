@@ -32,8 +32,11 @@ async function tmpRoot(): Promise<string> {
 }
 
 describe('profile store canonical serialization', () => {
-  it('accepts kimi as an agent kind', () => {
-    expect(agentKindFromString('kimi')).toBe('kimi');
+  it('accepts zcode as an agent kind and rejects removed upstream kinds', () => {
+    expect(agentKindFromString('zcode')).toBe('zcode');
+    expect(agentKindFromString(undefined)).toBeUndefined();
+    expect(() => agentKindFromString('claude')).toThrow(/unsupported agent/i);
+    expect(() => agentKindFromString('kimi')).toThrow(/unsupported agent/i);
   });
 
   it('saves stored root and profile config without unknown root fields or runtime-only profile fields', async () => {
@@ -50,7 +53,7 @@ describe('profile store canonical serialization', () => {
     };
     const profile = {
       ...createDefaultProfileConfig({
-        agentKind: 'codex',
+        agentKind: 'zcode',
         accounts: { app },
         secrets: { defaults: { env: 'profileEnv' } },
         preferences: {
@@ -63,10 +66,10 @@ describe('profile store canonical serialization', () => {
           admins: ['ou_admin'],
           requireMentionInGroup: false,
         },
-        codex: {
-          binaryPath: '/usr/local/bin/codex',
-          codexHome: '/tmp/codex-home',
-          inheritCodexHome: false,
+        zcode: {
+          runtimePath: '/opt/zcode/zcode.cjs',
+          realpath: '/opt/zcode/zcode.cjs',
+          version: '0.16.3',
         },
         permissions: {
           defaultAccess: 'workspace',
@@ -97,39 +100,39 @@ describe('profile store canonical serialization', () => {
 
     await saveRootConfig({
       schemaVersion: 2,
-      activeProfile: 'codex',
+      activeProfile: 'zcode',
       preferences: { messageReply: 'text' },
       secrets: rootSecrets,
       migrations: {
         permissionDefaultsV1: [
-          'codex',
-          'codex',
-          '  claude  ',
-          'claude',
-          'claude ',
+          'zcode',
+          'zcode',
+          '  dev  ',
+          'dev',
+          'dev ',
           '',
           42 as unknown as string,
         ],
       },
-      profiles: { codex: profile },
+      profiles: { zcode: profile },
       extra: true,
     } as unknown as RootConfig & { extra?: true; preferences: any }, configPath);
 
     const saved = JSON.parse(await readFile(configPath, 'utf8'));
     expect(saved.schemaVersion).toBe(2);
-    expect(saved.activeProfile).toBe('codex');
+    expect(saved.activeProfile).toBe('zcode');
     expect(saved.secrets).toEqual(rootSecrets);
     expect(saved.preferences).toEqual({});
-    expect(saved.migrations).toEqual({ permissionDefaultsV1: ['claude', 'codex'] });
+    expect(saved.migrations).toEqual({ permissionDefaultsV1: ['dev', 'zcode'] });
     expect(saved).not.toHaveProperty('extra');
 
-    const savedProfile = saved.profiles.codex;
+    const savedProfile = saved.profiles.zcode;
     expect(savedProfile.accounts).toEqual(profile.accounts);
     expect(savedProfile.secrets).toEqual(profile.secrets);
     expect(savedProfile.preferences).toEqual(profile.preferences);
     expect(savedProfile.access).toEqual(profile.access);
     expect(savedProfile.workspaces).toEqual(profile.workspaces);
-    expect(savedProfile.codex).toEqual(profile.codex);
+    expect(savedProfile.zcode).toEqual(profile.zcode);
     expect(savedProfile.attachments).toEqual(profile.attachments);
     expect(savedProfile.comments).toEqual(profile.comments);
     expect(savedProfile.larkCli).toEqual(profile.larkCli);
@@ -146,9 +149,9 @@ describe('profile store canonical serialization', () => {
     const root = await tmpRoot();
     const configPath = join(root, 'config.json');
     const profile = createDefaultProfileConfig({
-      agentKind: 'codex',
+      agentKind: 'zcode',
       accounts: { app },
-      codex: { binaryPath: '/usr/local/bin/codex' },
+      zcode: { runtimePath: '/opt/zcode/zcode.cjs' },
       permissions: {
         defaultAccess: 'workspace',
         maxAccess: 'workspace',
@@ -157,68 +160,67 @@ describe('profile store canonical serialization', () => {
 
     await saveRootConfig({
       schemaVersion: 2,
-      activeProfile: 'codex',
+      activeProfile: 'zcode',
       preferences: {},
-      profiles: { codex: profile },
+      profiles: { zcode: profile },
     }, configPath);
 
     const loaded = await loadRootConfig(configPath);
-    expect(loaded?.profiles.codex?.permissions).toEqual({
+    expect(loaded?.profiles.zcode?.permissions).toEqual({
       defaultAccess: 'workspace',
       maxAccess: 'workspace',
     });
-    expect(loaded?.profiles.codex?.sandbox).toMatchObject({
+    expect(loaded?.profiles.zcode?.sandbox).toMatchObject({
       defaultMode: 'workspace-write',
       maxMode: 'workspace-write',
     });
   });
 
-  it('round-trips Kimi binary configuration', async () => {
+  it('round-trips ZCode runtime configuration', async () => {
     const root = await tmpRoot();
     const configPath = join(root, 'config.json');
     const profile = createDefaultProfileConfig({
-      agentKind: 'kimi',
+      agentKind: 'zcode',
       accounts: { app },
-      kimi: { binaryPath: '/usr/local/bin/kimi', defaultModel: 'kimi-code/k3' },
+      zcode: { runtimePath: '/opt/zcode/zcode.cjs', defaultModel: 'bigmodel/glm-5.2' },
     });
     profile.workspaces = {
-      default: '/repo/kimi',
-      allowedRoots: ['/repo/kimi-secondary'],
+      default: '/repo/zcode',
     };
 
     await saveRootConfig({
       schemaVersion: 2,
-      activeProfile: 'kimi',
+      activeProfile: 'zcode',
       preferences: {},
-      profiles: { kimi: profile },
+      profiles: { zcode: profile },
     }, configPath);
 
     const stored = JSON.parse(await readFile(configPath, 'utf8')) as {
-      profiles: Record<string, { kimi?: { binaryPath?: string; defaultModel?: string } }>;
+      profiles: Record<string, { zcode?: { runtimePath?: string; defaultModel?: string } }>;
     };
     const loaded = await loadRootConfig(configPath);
-    expect(stored.profiles.kimi?.kimi).toEqual({
-      binaryPath: '/usr/local/bin/kimi',
-      defaultModel: 'kimi-code/k3',
+    expect(stored.profiles.zcode?.zcode).toEqual({
+      runtimePath: '/opt/zcode/zcode.cjs',
+      defaultModel: 'bigmodel/glm-5.2',
     });
-    expect(loaded?.profiles.kimi?.kimi).toEqual({
-      binaryPath: '/usr/local/bin/kimi',
-      defaultModel: 'kimi-code/k3',
+    expect(loaded?.profiles.zcode?.zcode).toEqual({
+      runtimePath: '/opt/zcode/zcode.cjs',
+      defaultModel: 'bigmodel/glm-5.2',
     });
-    expect(loaded?.profiles.kimi?.workspaces).toEqual({
-      default: '/repo/kimi',
-      allowedRoots: ['/repo/kimi-secondary'],
+    expect(loaded?.profiles.zcode?.workspaces).toEqual({
+      default: '/repo/zcode',
     });
   });
 
   it('marks newly created roots as already evaluated for permission default migration', () => {
     const profile = createDefaultProfileConfig({
-      agentKind: 'claude',
+      agentKind: 'zcode',
       accounts: { app },
+      zcode: { runtimePath: '/opt/zcode/zcode.cjs' },
     });
 
-    const root = createRootConfig('claude', profile);
+    const root = createRootConfig('zcode', profile);
 
-    expect(root.migrations?.permissionDefaultsV1).toEqual(['claude']);
+    expect(root.migrations?.permissionDefaultsV1).toEqual(['zcode']);
   });
 });

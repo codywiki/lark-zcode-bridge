@@ -5,16 +5,17 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { runMigrate } from '../../../src/cli/commands/migrate';
 import {
-  ActiveBridgeMigrationConflictError,
   migrateV1ToV2,
   type ActiveBridgeMigrationProcess,
 } from '../../../src/config/migrate-v2';
 import type { RootConfig } from '../../../src/config/profile-schema';
 import { resolveProfileRuntime } from '../../../src/runtime/profile-runtime';
-import { writeVersionExecutable } from '../../helpers/fake-executable';
 
 const roots: string[] = [];
 const childProcesses: ChildProcess[] = [];
+
+const ZCODE_RUNTIME_ENV = 'LARK_ZCODE_BRIDGE_RUNTIME_PATH';
+const savedRuntimeEnv = process.env[ZCODE_RUNTIME_ENV];
 
 async function makeRoot(): Promise<string> {
   const root = await import('node:fs/promises').then((fs) =>
@@ -24,13 +25,35 @@ async function makeRoot(): Promise<string> {
   return root;
 }
 
+/**
+ * Write a readable fake zcode runtime and point the bootstrap probe at it.
+ * `runMigrate` resolves the runtime via defaultZcodeRuntimePath() when a v1
+ * config actually needs migration, so the env var must cover those paths.
+ */
+async function useFakeZcodeRuntime(root: string): Promise<string> {
+  const file = join(root, 'zcode-runtime.cjs');
+  await writeFile(file, '// fake zcode runtime for tests\n', { mode: 0o600 });
+  process.env[ZCODE_RUNTIME_ENV] = file;
+  return file;
+}
+
+/** zcode config for direct migrateV1ToV2 calls (no readability check there). */
+function fakeZcodeConfig(root: string): { runtimePath: string } {
+  return { runtimePath: join(root, 'zcode-runtime.cjs') };
+}
+
 afterEach(async () => {
+  if (savedRuntimeEnv === undefined) {
+    delete process.env[ZCODE_RUNTIME_ENV];
+  } else {
+    process.env[ZCODE_RUNTIME_ENV] = savedRuntimeEnv;
+  }
   await Promise.all(childProcesses.splice(0).map(killChild));
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 describe('profile v2 migration', () => {
-  it('backs up root config, migrates access, and moves runtime state into the claude profile', async () => {
+  it('backs up root config, migrates access, and moves runtime state into the zcode profile', async () => {
     const root = await makeRoot();
     const legacyConfig = {
       accounts: {
@@ -73,30 +96,35 @@ describe('profile v2 migration', () => {
     await mkdir(join(root, 'logs'), { recursive: true });
     await writeFile(join(root, 'logs', 'today.log'), 'log');
 
-    const result = await migrateV1ToV2({ rootDir: root, profile: 'claude' });
+    const result = await migrateV1ToV2({
+      rootDir: root,
+      profile: 'zcode',
+      zcode: fakeZcodeConfig(root),
+    });
 
-    expect(result).toEqual({ migrated: true, profile: 'claude' });
+    expect(result).toEqual({ migrated: true, profile: 'zcode' });
     expect(await readJson(join(root, 'config.json.bak'))).toEqual(legacyConfig);
 
     const next = (await readJson(join(root, 'config.json'))) as RootConfig;
     expect(next.schemaVersion).toBe(2);
-    expect(next.activeProfile).toBe('claude');
+    expect(next.activeProfile).toBe('zcode');
     expect(next.secrets).toEqual(legacyConfig.secrets);
-    expect(next.profiles.claude?.access).toEqual({
+    expect(next.profiles.zcode?.agentKind).toBe('zcode');
+    expect(next.profiles.zcode?.access).toEqual({
       allowedUsers: ['ou_allowed'],
       allowedChats: ['oc_allowed'],
       admins: ['ou_admin'],
       requireMentionInGroup: false,
     });
-    expect(next.profiles.claude?.preferences).toEqual({ messageReply: 'card' });
-    expect(next.profiles.claude?.workspaces).toEqual({});
-    expect(next.profiles.claude?.permissions).toEqual({
+    expect(next.profiles.zcode?.preferences).toEqual({ messageReply: 'card' });
+    expect(next.profiles.zcode?.workspaces).toEqual({});
+    expect(next.profiles.zcode?.permissions).toEqual({
       defaultAccess: 'full',
       maxAccess: 'full',
     });
-    expect(next.profiles.claude).not.toHaveProperty('sandbox');
+    expect(next.profiles.zcode).not.toHaveProperty('sandbox');
 
-    const profileDir = join(root, 'profiles', 'claude');
+    const profileDir = join(root, 'profiles', 'zcode');
     await expect(stat(join(profileDir, 'sessions.json'))).resolves.toBeDefined();
     await expect(stat(join(profileDir, 'workspaces.json'))).resolves.toBeDefined();
     await expect(stat(join(profileDir, 'secrets.enc'))).resolves.toBeDefined();
@@ -132,7 +160,9 @@ describe('profile v2 migration', () => {
       ],
     });
 
-    await expect(migrateV1ToV2({ rootDir: root, profile: 'claude' })).rejects.toMatchObject({
+    await expect(
+      migrateV1ToV2({ rootDir: root, profile: 'zcode', zcode: fakeZcodeConfig(root) }),
+    ).rejects.toMatchObject({
       name: 'ActiveBridgeMigrationConflictError',
       processes: [
         expect.objectContaining({
@@ -148,6 +178,7 @@ describe('profile v2 migration', () => {
 
   it('stops active bridge processes and retries the migrate command after confirmation', async () => {
     const root = await makeRoot();
+    await useFakeZcodeRuntime(root);
     await writeJson(join(root, 'config.json'), legacyConfigFixture());
     await writeJson(join(root, 'processes.json'), {
       entries: [
@@ -166,7 +197,7 @@ describe('profile v2 migration', () => {
 
     await runMigrate({
       config: join(root, 'config.json'),
-      profile: 'claude',
+      profile: 'zcode',
       confirmStopActiveBridgeProcesses: async () => true,
       stopActiveBridgeProcesses: async (processes) => {
         stopped.push(processes);
@@ -184,11 +215,12 @@ describe('profile v2 migration', () => {
     ]);
     const next = (await readJson(join(root, 'config.json'))) as RootConfig;
     expect(next.schemaVersion).toBe(2);
-    expect(next.activeProfile).toBe('claude');
+    expect(next.activeProfile).toBe('zcode');
   });
 
   it('upgrades a legacy config by stopping the active old-version process after confirmation', async () => {
     const root = await makeRoot();
+    await useFakeZcodeRuntime(root);
     const pid = spawnLiveProcess();
     await writeJson(join(root, 'config.json'), legacyConfigFixture());
     await writeJson(join(root, 'processes.json'), {
@@ -207,14 +239,14 @@ describe('profile v2 migration', () => {
 
     await runMigrate({
       config: join(root, 'config.json'),
-      profile: 'claude',
+      profile: 'zcode',
       confirmStopActiveBridgeProcesses: async () => true,
     });
 
     expect(isProcessAlive(pid)).toBe(false);
     const next = (await readJson(join(root, 'config.json'))) as RootConfig;
     expect(next.schemaVersion).toBe(2);
-    expect(next.activeProfile).toBe('claude');
+    expect(next.activeProfile).toBe('zcode');
     await expect(stat(join(root, 'config.json.bak'))).resolves.toBeDefined();
   });
 
@@ -235,19 +267,24 @@ describe('profile v2 migration', () => {
       ],
     });
 
-    const result = await migrateV1ToV2({ rootDir: root, profile: 'claude' });
+    const result = await migrateV1ToV2({
+      rootDir: root,
+      profile: 'zcode',
+      zcode: fakeZcodeConfig(root),
+    });
 
-    expect(result).toEqual({ migrated: true, profile: 'claude' });
+    expect(result).toEqual({ migrated: true, profile: 'zcode' });
     const next = (await readJson(join(root, 'config.json'))) as RootConfig;
     expect(next.schemaVersion).toBe(2);
   });
 
   it('keeps repeated migration on an existing v2 config as a no-op even with active registry entries', async () => {
     const root = await makeRoot();
+    await useFakeZcodeRuntime(root);
     await writeJson(join(root, 'config.json'), legacyConfigFixture());
     await runMigrate({
       config: join(root, 'config.json'),
-      profile: 'claude',
+      profile: 'zcode',
       confirmStopActiveBridgeProcesses: async () => true,
     });
     const first = (await readJson(join(root, 'config.json'))) as RootConfig;
@@ -259,8 +296,8 @@ describe('profile v2 migration', () => {
           pid: activePid,
           appId: 'cli_test',
           tenant: 'feishu',
-          profileName: 'claude',
-          agentKind: 'claude',
+          profileName: 'zcode',
+          agentKind: 'zcode',
           configPath: join(root, 'config.json'),
           startedAt: new Date().toISOString(),
           version: '0.2.2',
@@ -270,7 +307,7 @@ describe('profile v2 migration', () => {
 
     await runMigrate({
       config: join(root, 'config.json'),
-      profile: 'claude',
+      profile: 'zcode',
       confirmStopActiveBridgeProcesses: async () => {
         throw new Error('repeat migration should not ask to stop active v2 processes');
       },
@@ -285,6 +322,7 @@ describe('profile v2 migration', () => {
 
   it('keeps legacy config unchanged when the user declines stopping active bridges', async () => {
     const root = await makeRoot();
+    await useFakeZcodeRuntime(root);
     const legacyConfig = legacyConfigFixture();
     await writeJson(join(root, 'config.json'), legacyConfig);
     await writeJson(join(root, 'processes.json'), {
@@ -303,7 +341,7 @@ describe('profile v2 migration', () => {
 
     await runMigrate({
       config: join(root, 'config.json'),
-      profile: 'claude',
+      profile: 'zcode',
       confirmStopActiveBridgeProcesses: async () => false,
       stopActiveBridgeProcesses: async () => {
         throw new Error('stop should not be called');
@@ -316,6 +354,7 @@ describe('profile v2 migration', () => {
 
   it('lets runtime bootstrap callers handle active bridge conflicts and retry automatic migration', async () => {
     const root = await makeRoot();
+    await useFakeZcodeRuntime(root);
     await writeJson(join(root, 'config.json'), legacyConfigFixture());
     await writeJson(join(root, 'processes.json'), {
       entries: [
@@ -334,7 +373,7 @@ describe('profile v2 migration', () => {
 
     const runtime = await resolveProfileRuntime({
       config: join(root, 'config.json'),
-      profile: 'claude',
+      profile: 'zcode',
       allowBootstrap: false,
       handleActiveBridgeMigrationConflict: async (err) => {
         handled.push(err.processes);
@@ -344,7 +383,7 @@ describe('profile v2 migration', () => {
     });
 
     expect(handled).toHaveLength(1);
-    expect(runtime.profile).toBe('claude');
+    expect(runtime.profile).toBe('zcode');
     expect(runtime.profileConfig.accounts.app.id).toBe('cli_test');
     const next = (await readJson(join(root, 'config.json'))) as RootConfig;
     expect(next.schemaVersion).toBe(2);
@@ -360,11 +399,11 @@ describe('profile v2 migration', () => {
       named: { main: concrete },
     });
 
-    await migrateV1ToV2({ rootDir: root, profile: 'claude' });
+    await migrateV1ToV2({ rootDir: root, profile: 'zcode', zcode: fakeZcodeConfig(root) });
 
     const next = (await readJson(join(root, 'config.json'))) as RootConfig;
     const concreteRealpath = await realpath(concrete);
-    expect(next.profiles.claude?.workspaces.default).toBe(concreteRealpath);
+    expect(next.profiles.zcode?.workspaces.default).toBe(concreteRealpath);
   });
 
   it('does not import broad legacy workspaces', async () => {
@@ -375,82 +414,36 @@ describe('profile v2 migration', () => {
       named: { home: homedir() },
     });
 
-    await migrateV1ToV2({ rootDir: root, profile: 'claude' });
+    await migrateV1ToV2({ rootDir: root, profile: 'zcode', zcode: fakeZcodeConfig(root) });
 
     const next = (await readJson(join(root, 'config.json'))) as RootConfig;
-    expect(next.profiles.claude?.workspaces.default).toBeUndefined();
+    expect(next.profiles.zcode?.workspaces.default).toBeUndefined();
   });
 
-  it('migrates a legacy config to Codex through the migrate command', async () => {
+  it('migrates a legacy config to zcode through the migrate command', async () => {
     const root = await makeRoot();
-    const codex = await writeVersionExecutable(root, 'codex', 'codex 1.2.3');
-    const oldCodexBin = process.env.LARK_CHANNEL_CODEX_BIN;
-    process.env.LARK_CHANNEL_CODEX_BIN = codex;
+    const runtimePath = await useFakeZcodeRuntime(root);
     await writeJson(join(root, 'config.json'), legacyConfigFixture());
 
-    try {
-      await runMigrate({
-        config: join(root, 'config.json'),
-        profile: 'codex',
-        agent: 'codex',
-      });
-    } finally {
-      if (oldCodexBin === undefined) {
-        delete process.env.LARK_CHANNEL_CODEX_BIN;
-      } else {
-        process.env.LARK_CHANNEL_CODEX_BIN = oldCodexBin;
-      }
-    }
+    await runMigrate({
+      config: join(root, 'config.json'),
+      profile: 'zcode',
+      agent: 'zcode',
+    });
 
     const next = (await readJson(join(root, 'config.json'))) as RootConfig;
-    expect(next.activeProfile).toBe('codex');
-    expect(next.profiles.codex?.agentKind).toBe('codex');
-    expect(next.profiles.codex?.codex).toMatchObject({
-      binaryPath: codex,
+    expect(next.activeProfile).toBe('zcode');
+    expect(next.profiles.zcode?.agentKind).toBe('zcode');
+    expect(next.profiles.zcode?.zcode).toMatchObject({
+      runtimePath,
     });
-    expect(next.profiles.codex?.codex?.realpath).toBeUndefined();
-    expect(next.profiles.codex?.codex?.version).toBeUndefined();
-    expect(next.profiles.codex?.codex?.sha256).toBeUndefined();
-    expect(next.profiles.codex?.permissions).toEqual({
+    expect(next.profiles.zcode?.zcode?.realpath).toBeUndefined();
+    expect(next.profiles.zcode?.zcode?.version).toBeUndefined();
+    expect(next.profiles.zcode?.permissions).toEqual({
       defaultAccess: 'full',
       maxAccess: 'full',
     });
-    expect(next.profiles.codex).not.toHaveProperty('sandbox');
-  });
-
-  it('migrates a legacy config to a read-only Kimi profile through the migrate command', async () => {
-    const root = await makeRoot();
-    const kimi = await writeVersionExecutable(root, 'kimi', 'kimi 0.29.2');
-    const oldKimiBin = process.env.LARK_CHANNEL_KIMI_BIN;
-    process.env.LARK_CHANNEL_KIMI_BIN = kimi;
-    await writeJson(join(root, 'config.json'), legacyConfigFixture());
-
-    try {
-      await runMigrate({
-        config: join(root, 'config.json'),
-        profile: 'kimi',
-        agent: 'kimi',
-      });
-    } finally {
-      if (oldKimiBin === undefined) {
-        delete process.env.LARK_CHANNEL_KIMI_BIN;
-      } else {
-        process.env.LARK_CHANNEL_KIMI_BIN = oldKimiBin;
-      }
-    }
-
-    const next = (await readJson(join(root, 'config.json'))) as RootConfig;
-    expect(next.activeProfile).toBe('kimi');
-    expect(next.profiles.kimi?.agentKind).toBe('kimi');
-    expect(next.profiles.kimi?.kimi).toEqual({
-      binaryPath: kimi,
-      defaultModel: 'kimi-code/k3',
-    });
-    expect(next.profiles.kimi?.permissions).toEqual({
-      defaultAccess: 'read-only',
-      maxAccess: 'read-only',
-    });
-    expect(next.profiles.kimi).not.toHaveProperty('sandbox');
+    expect(next.profiles.zcode).not.toHaveProperty('sandbox');
   });
 });
 

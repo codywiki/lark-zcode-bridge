@@ -25,38 +25,38 @@ describe('listAllProfiles', () => {
   it('lists profiles from root config with active profile first and others sorted', async () => {
     const root = await makeRoot();
     await writeRootConfig(root, {
-      activeProfile: 'claude',
+      activeProfile: 'zcode',
       profiles: {
-        zeta: profile('claude', 'cli_zeta'),
-        claude: profile('claude', 'cli_claude'),
-        'codex-dev': profile('codex', 'cli_codex'),
+        zeta: profile('zcode', 'cli_zeta'),
+        zcode: profile('zcode', 'cli_zcode'),
+        'zcode-dev': profile('zcode', 'cli_zcode_dev'),
       },
     });
-    await writeFile(join(root, 'active-profile'), 'codex-dev\n', 'utf8');
-    await mkdir(join(root, 'profiles', 'claude'), { recursive: true });
-    await mkdir(join(root, 'profiles', 'codex-dev'), { recursive: true });
+    await writeFile(join(root, 'active-profile'), 'zcode-dev\n', 'utf8');
+    await mkdir(join(root, 'profiles', 'zcode'), { recursive: true });
+    await mkdir(join(root, 'profiles', 'zcode-dev'), { recursive: true });
     await mkdir(join(root, 'profiles', 'zeta'), { recursive: true });
 
     const profiles = await listAllProfiles(root);
 
-    expect(profiles.map((item) => item.name)).toEqual(['codex-dev', 'claude', 'zeta']);
+    expect(profiles.map((item) => item.name)).toEqual(['zcode-dev', 'zcode', 'zeta']);
     expect(profiles.map((item) => item.active)).toEqual([true, false, false]);
     expect(profiles[0]).toMatchObject({
-      agentKind: 'codex',
-      profileDir: join(root, 'profiles', 'codex-dev'),
+      agentKind: 'zcode',
+      profileDir: join(root, 'profiles', 'zcode-dev'),
     });
   });
 
   it('fails when active-profile points at a missing profile', async () => {
     const root = await makeRoot();
     await writeRootConfig(root, {
-      activeProfile: 'claude',
+      activeProfile: 'zcode',
       profiles: {
-        claude: profile('claude', 'cli_claude'),
+        zcode: profile('zcode', 'cli_zcode'),
       },
     });
     await writeFile(join(root, 'active-profile'), 'missing\n', 'utf8');
-    await mkdir(join(root, 'profiles', 'claude'), { recursive: true });
+    await mkdir(join(root, 'profiles', 'zcode'), { recursive: true });
 
     await expect(listAllProfiles(root)).rejects.toThrow('active profile not found: missing');
   });
@@ -64,26 +64,26 @@ describe('listAllProfiles', () => {
   it('fails when config profiles are missing state directories', async () => {
     const root = await makeRoot();
     await writeRootConfig(root, {
-      activeProfile: 'claude',
+      activeProfile: 'zcode',
       profiles: {
-        claude: profile('claude', 'cli_claude'),
-        'codex-dev': profile('codex', 'cli_codex'),
+        zcode: profile('zcode', 'cli_zcode'),
+        'zcode-dev': profile('zcode', 'cli_zcode_dev'),
       },
     });
-    await mkdir(join(root, 'profiles', 'claude'), { recursive: true });
+    await mkdir(join(root, 'profiles', 'zcode'), { recursive: true });
 
-    await expect(listAllProfiles(root)).rejects.toThrow('profile state directory missing: codex-dev');
+    await expect(listAllProfiles(root)).rejects.toThrow('profile state directory missing: zcode-dev');
   });
 
   it('fails when a state directory has no matching config profile', async () => {
     const root = await makeRoot();
     await writeRootConfig(root, {
-      activeProfile: 'claude',
+      activeProfile: 'zcode',
       profiles: {
-        claude: profile('claude', 'cli_claude'),
+        zcode: profile('zcode', 'cli_zcode'),
       },
     });
-    await mkdir(join(root, 'profiles', 'claude'), { recursive: true });
+    await mkdir(join(root, 'profiles', 'zcode'), { recursive: true });
     await mkdir(join(root, 'profiles', 'orphan'), { recursive: true });
 
     await expect(listAllProfiles(root)).rejects.toThrow(
@@ -94,21 +94,21 @@ describe('listAllProfiles', () => {
   it('ignores a log-only orphan profile directory left by early startup logging', async () => {
     const root = await makeRoot();
     await writeRootConfig(root, {
-      activeProfile: 'codex-dev',
+      activeProfile: 'zcode-dev',
       profiles: {
-        'codex-dev': profile('codex', 'cli_codex'),
+        'zcode-dev': profile('zcode', 'cli_zcode_dev'),
       },
     });
-    await mkdir(join(root, 'profiles', 'codex-dev'), { recursive: true });
-    await mkdir(join(root, 'profiles', 'claude', 'logs'), { recursive: true });
+    await mkdir(join(root, 'profiles', 'zcode-dev'), { recursive: true });
+    await mkdir(join(root, 'profiles', 'zcode', 'logs'), { recursive: true });
     await writeFile(
-      join(root, 'profiles', 'claude', 'logs', 'bridge-20260526.jsonl'),
+      join(root, 'profiles', 'zcode', 'logs', 'bridge-20260526.jsonl'),
       '{}\n',
       'utf8',
     );
 
     await expect(listAllProfiles(root)).resolves.toMatchObject([
-      { name: 'codex-dev', active: true },
+      { name: 'zcode-dev', active: true },
     ]);
   });
 });
@@ -123,7 +123,7 @@ function profile(agentKind: AgentKind, appId: string) {
         tenant: 'feishu',
       },
     },
-    ...(agentKind === 'codex' ? { codex: { binaryPath: 'codex' } } : {}),
+    zcode: { runtimePath: '/opt/zcode/zcode.cjs' },
   });
 }
 

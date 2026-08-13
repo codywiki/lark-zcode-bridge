@@ -68,25 +68,25 @@ describe('profile-aware account and config commands', () => {
     });
 
     const root = await waitForRoot(h.rootDir, (candidate) =>
-      candidate.profiles.claude?.preferences.messageReply === 'text',
+      candidate.profiles.zcode?.preferences.messageReply === 'text',
     );
     expect(root.schemaVersion).toBe(2);
-    expect(root.activeProfile).toBe('claude');
-    expect(root.profiles['codex-dev']).toBeDefined();
-    expect(root.profiles.claude?.preferences).toMatchObject({
+    expect(root.activeProfile).toBe('zcode');
+    expect(root.profiles['zcode-dev']).toBeDefined();
+    expect(root.profiles.zcode?.preferences).toMatchObject({
       messageReply: 'text',
       messageReplyMigrated: true,
       showToolCalls: false,
       maxConcurrentRuns: 7,
       runIdleTimeoutMinutes: 15,
     });
-    expect(root.profiles.claude?.access.requireMentionInGroup).toBe(false);
-    expect(root.profiles.claude?.larkCli.identityPreset).toBe('user-default');
-    expect(root.profiles.claude?.larkCli.localUserImport).toMatchObject({
+    expect(root.profiles.zcode?.access.requireMentionInGroup).toBe(false);
+    expect(root.profiles.zcode?.larkCli.identityPreset).toBe('user-default');
+    expect(root.profiles.zcode?.larkCli.localUserImport).toMatchObject({
       status: 'not-needed',
       reason: 'manual-user-default',
     });
-    expect(getRequireMentionInGroup(runtimeProfileConfig(root, 'claude'))).toBe(false);
+    expect(getRequireMentionInGroup(runtimeProfileConfig(root, 'zcode'))).toBe(false);
     expect((root as unknown as { accounts?: unknown }).accounts).toBeUndefined();
   });
 
@@ -110,8 +110,8 @@ describe('profile-aware account and config commands', () => {
     });
 
     const root = await readRoot(h.rootDir);
-    expect(root.profiles.claude?.larkCli.identityPreset).toBe('bot-only');
-    expect(root.profiles.claude?.preferences.messageReply).not.toBe('text');
+    expect(root.profiles.zcode?.larkCli.identityPreset).toBe('bot-only');
+    expect(root.profiles.zcode?.preferences.messageReply).not.toBe('text');
     expect(appliedLarkCliIdentities()).toEqual([
       'user-default',
       'bot-only',
@@ -168,11 +168,11 @@ describe('profile-aware account and config commands', () => {
     });
 
     const root = await waitForRoot(h.rootDir, (candidate) =>
-      candidate.profiles.claude?.accounts.app.id === 'cli_new',
+      candidate.profiles.zcode?.accounts.app.id === 'cli_new',
     );
     expect(root.schemaVersion).toBe(2);
-    expect(root.profiles['codex-dev']).toBeDefined();
-    expect(root.profiles.claude?.accounts.app).toMatchObject({
+    expect(root.profiles['zcode-dev']).toBeDefined();
+    expect(root.profiles.zcode?.accounts.app).toMatchObject({
       id: 'cli_new',
       tenant: 'lark',
       secret: {
@@ -184,13 +184,13 @@ describe('profile-aware account and config commands', () => {
     expect(root.secrets?.providers?.bridge?.command).toContain('secrets-getter');
     expect((root as unknown as { accounts?: unknown }).accounts).toBeUndefined();
     await expect(
-      getSecret(secretKeyForApp('cli_new'), resolveAppPaths({ rootDir: h.rootDir, profile: 'claude' })),
+      getSecret(secretKeyForApp('cli_new'), resolveAppPaths({ rootDir: h.rootDir, profile: 'zcode' })),
     ).resolves.toBe('new-secret');
-    const claudePaths = resolveAppPaths({ rootDir: h.rootDir, profile: 'claude' });
-    const codexPaths = resolveAppPaths({ rootDir: h.rootDir, profile: 'codex-dev' });
-    expect(claudePaths.secretsFile).not.toBe(codexPaths.secretsFile);
+    const zcodePaths = resolveAppPaths({ rootDir: h.rootDir, profile: 'zcode' });
+    const devPaths = resolveAppPaths({ rootDir: h.rootDir, profile: 'zcode-dev' });
+    expect(zcodePaths.secretsFile).not.toBe(devPaths.secretsFile);
     await expect(
-      listSecretIds(codexPaths),
+      listSecretIds(devPaths),
     ).resolves.not.toContain(secretKeyForApp('cli_new'));
   });
 });
@@ -205,13 +205,13 @@ async function createHarness(): Promise<{
   const workspace = join(rootDir, 'workspace');
   await mkdir(workspace, { recursive: true });
   const root = await writeRoot(rootDir, workspace);
-  const profileConfig = root.profiles.claude!;
-  const appPaths = resolveAppPaths({ rootDir, profile: 'claude' });
+  const profileConfig = root.profiles.zcode!;
+  const appPaths = resolveAppPaths({ rootDir, profile: 'zcode' });
   const channel = createFakeChannel();
   const sessions = new SessionStore(appPaths.sessionsFile);
   const workspaces = new WorkspaceStore(appPaths.workspacesFile);
   const controls = {
-    profile: 'claude',
+    profile: 'zcode',
     profileConfig,
     botOwnerId: 'ou-admin',
     ownerRefreshState: 'ok',
@@ -219,7 +219,7 @@ async function createHarness(): Promise<{
     restart: vi.fn(async () => {}),
     exit: vi.fn(async () => {}),
     configPath: appPaths.configFile,
-    cfg: runtimeProfileConfig(root, 'claude'),
+    cfg: runtimeProfileConfig(root, 'zcode'),
     processId: 'proc-1',
   } satisfies Controls;
 
@@ -246,28 +246,29 @@ async function createHarness(): Promise<{
 async function writeRoot(rootDir: string, workspace: string): Promise<RootConfig> {
   const root: RootConfig = {
     schemaVersion: 2,
-    activeProfile: 'claude',
+    activeProfile: 'zcode',
     preferences: {},
     profiles: {
-      claude: createDefaultProfileConfig({
-        agentKind: 'claude',
+      zcode: createDefaultProfileConfig({
+        agentKind: 'zcode',
         accounts: {
           app: { id: 'cli_old', secret: '${APP_SECRET}', tenant: 'feishu' },
         },
         access: { admins: ['ou-admin'] },
+        zcode: { runtimePath: '/usr/local/bin/zcode' },
       }),
-      'codex-dev': createDefaultProfileConfig({
-        agentKind: 'codex',
+      'zcode-dev': createDefaultProfileConfig({
+        agentKind: 'zcode',
         accounts: {
-          app: { id: 'cli_codex', secret: '${APP_SECRET}', tenant: 'feishu' },
+          app: { id: 'cli_dev', secret: '${APP_SECRET}', tenant: 'feishu' },
         },
-        codex: { binaryPath: 'codex' },
+        zcode: { runtimePath: '/usr/local/bin/zcode' },
       }),
     },
   };
-  root.profiles.claude!.workspaces.default = workspace;
+  root.profiles.zcode!.workspaces.default = workspace;
   await writeJson(resolveAppPaths({ rootDir }).configFile, root);
-  await writeFile(join(rootDir, 'active-profile'), 'claude\n', 'utf8');
+  await writeFile(join(rootDir, 'active-profile'), 'zcode\n', 'utf8');
   return root;
 }
 

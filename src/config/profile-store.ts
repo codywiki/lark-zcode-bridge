@@ -55,8 +55,7 @@ type StoredProfileConfig = Pick<
   | 'access'
   | 'workspaces'
   | 'permissions'
-  | 'codex'
-  | 'kimi'
+  | 'zcode'
   | 'attachments'
   | 'comments'
   | 'larkCli'
@@ -93,8 +92,7 @@ function serializeProfileConfig(profile: ProfileConfig): StoredProfileConfig {
     access: profile.access,
     workspaces: profile.workspaces,
     permissions: profile.permissions,
-    ...(profile.codex ? { codex: profile.codex } : {}),
-    ...(profile.kimi ? { kimi: profile.kimi } : {}),
+    ...(profile.zcode ? { zcode: profile.zcode } : {}),
     attachments: profile.attachments,
     comments: {},
     larkCli: profile.larkCli,
@@ -125,7 +123,7 @@ export async function withConfigFileLock<T>(configPath: string, fn: () => Promis
 
 export async function readActiveProfile(rootDir?: string): Promise<string | undefined> {
   const activeProfileFile = join(
-    rootDir ?? process.env.LARK_CHANNEL_HOME ?? resolveAppPaths().rootDir,
+    rootDir ?? process.env.LARK_ZCODE_BRIDGE_HOME ?? resolveAppPaths().rootDir,
     'active-profile',
   );
   try {
@@ -294,7 +292,7 @@ async function pathExists(path: string): Promise<boolean> {
 }
 
 export function agentKindFromString(value: string | undefined): AgentKind | undefined {
-  if (value === 'claude' || value === 'codex' || value === 'kimi') return value;
+  if (value === 'zcode') return value;
   if (value === undefined) return undefined;
   throw new Error(`unsupported agent: ${value}`);
 }

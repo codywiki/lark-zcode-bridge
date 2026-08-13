@@ -32,8 +32,8 @@ describe('/doctor run observability', () => {
       (line) => line.phase === 'run' && line.event === 'started',
     );
     expect(started).toMatchObject({
-      profile: 'claude',
-      agent: 'claude',
+      profile: 'zcode',
+      agent: 'zcode',
       source: 'doctor',
       stage: 'agent-probe',
     });
@@ -65,14 +65,15 @@ async function createHarness(): Promise<{
     events: [[{ type: 'text', delta: 'OK' }, { type: 'done', terminationReason: 'normal' }]],
   });
   const profileConfig = createDefaultProfileConfig({
-    agentKind: 'claude',
+    agentKind: 'zcode',
     accounts: { app: { id: 'app-id', secret: 'secret', tenant: 'feishu' } },
     access: { admins: ['ou-admin'] },
     sandbox: { defaultMode: 'read-only', maxMode: 'workspace-write' },
+    zcode: { runtimePath: '/usr/local/bin/zcode' },
   });
   profileConfig.workspaces.default = tmp.workspace;
   const controls = {
-    profile: 'claude',
+    profile: 'zcode',
     profileConfig,
     botOwnerId: 'ou-owner',
     ownerRefreshState: 'ok',

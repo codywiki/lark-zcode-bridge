@@ -71,8 +71,8 @@ describe('access config concurrent writes', () => {
 
     const { loadRootConfig } = await import('../../../src/config/profile-store.js');
     const root = await loadRootConfig(h.configPath);
-    expect(root?.profiles.claude?.access.allowedUsers).toContain('ou-alice');
-    expect(root?.profiles.claude?.access.admins).toEqual(
+    expect(root?.profiles.zcode?.access.allowedUsers).toContain('ou-alice');
+    expect(root?.profiles.zcode?.access.admins).toEqual(
       expect.arrayContaining(['ou-admin', 'ou-bob']),
     );
   });
@@ -88,7 +88,7 @@ async function createHarness(): Promise<{
   const profileConfig = appConfig(await realpath(tmp.workspace));
   const { createRootConfig } = await import('../../../src/config/profile-store.js');
   await mkdir(tmp.root, { recursive: true });
-  await writeFile(configPath, `${JSON.stringify(createRootConfig('claude', profileConfig), null, 2)}\n`);
+  await writeFile(configPath, `${JSON.stringify(createRootConfig('zcode', profileConfig), null, 2)}\n`);
 
   const channel = createFakeChannel();
   const sessions = new SessionStore(join(tmp.profile, 'sessions.json'));
@@ -97,7 +97,7 @@ async function createHarness(): Promise<{
   const agent = createFakeAgent();
   const { tryHandleCommand } = await import('../../../src/commands/index.js');
   const controls = {
-    profile: 'claude',
+    profile: 'zcode',
     profileConfig,
     botOwnerId: 'ou-owner',
     ownerRefreshState: 'ok',
@@ -134,9 +134,10 @@ async function createHarness(): Promise<{
 
 function appConfig(defaultWorkspace: string): ProfileConfig {
   const config = createDefaultProfileConfig({
-    agentKind: 'claude',
+    agentKind: 'zcode',
     accounts: { app: { id: 'app-id', secret: 'secret', tenant: 'feishu' } },
     access: { admins: ['ou-admin'] },
+    zcode: { runtimePath: '/usr/local/bin/zcode' },
   });
   config.workspaces.default = defaultWorkspace;
   return config;

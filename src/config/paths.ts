@@ -27,10 +27,10 @@ export const paths = {
 export const legacyPaths = {
   appDir: join(
     process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'),
-    'lark-channel-bridge',
+    'lark-zcode-bridge',
   ),
   cacheDir: join(
     process.env.XDG_CACHE_HOME ?? join(homedir(), '.cache'),
-    'lark-channel-bridge',
+    'lark-zcode-bridge',
   ),
 };

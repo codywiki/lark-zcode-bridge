@@ -22,11 +22,11 @@ afterEach(async () => {
 describe('runtime locks', () => {
   it('acquires profile lock before app lock and writes 0600 targets with metadata sidecars', async () => {
     const root = await makeRoot();
-    const paths = resolveAppPaths({ rootDir: root, profile: 'claude' });
+    const paths = resolveAppPaths({ rootDir: root, profile: 'zcode' });
     await mkdir(paths.userLockDir, { recursive: true });
 
     const metaFiles: string[] = [];
-    const order = await withProfileAndAppLocks(paths, 'cli_test', 'codex', async (acquired) => {
+    const order = await withProfileAndAppLocks(paths, 'cli_test', 'zcode', async (acquired) => {
       expect(acquired.map((lock) => lock.kind)).toEqual(['profile', 'app']);
       for (const lock of acquired) {
         const mode = (await stat(lock.target)).mode & 0o777;
@@ -45,8 +45,8 @@ describe('runtime locks', () => {
         };
         expect(meta.kind).toBe(lock.kind);
         expect(meta.pid).toBe(process.pid);
-        expect(meta.profile).toBe('claude');
-        expect(meta.agentKind).toBe('codex');
+        expect(meta.profile).toBe('zcode');
+        expect(meta.agentKind).toBe('zcode');
         expect(meta.startedAt).toEqual(expect.any(String));
         if (lock.kind === 'app') expect(meta.appId).toBe('cli_test');
       }
@@ -68,35 +68,35 @@ describe('runtime locks', () => {
 
   it('surfaces holder metadata when profile or app locks conflict', async () => {
     const root = await makeRoot();
-    const first = resolveAppPaths({ rootDir: root, profile: 'claude' });
-    const second = resolveAppPaths({ rootDir: root, profile: 'codex-dev' });
+    const first = resolveAppPaths({ rootDir: root, profile: 'zcode' });
+    const second = resolveAppPaths({ rootDir: root, profile: 'zcode-dev' });
 
-    await withProfileAndAppLocks(first, 'cli_test', 'claude', async () => {
+    await withProfileAndAppLocks(first, 'cli_test', 'zcode', async () => {
       await expect(
-        withProfileAndAppLocks(first, 'cli_other', 'claude', async () => {}),
+        withProfileAndAppLocks(first, 'cli_other', 'zcode', async () => {}),
       ).rejects.toMatchObject({
         kind: 'profile',
         meta: {
-          profile: 'claude',
-          agentKind: 'claude',
+          profile: 'zcode',
+          agentKind: 'zcode',
           pid: process.pid,
         },
       });
 
       await expect(
-        withProfileAndAppLocks(second, 'cli_test', 'codex', async () => {}),
+        withProfileAndAppLocks(second, 'cli_test', 'zcode', async () => {}),
       ).rejects.toMatchObject({
         kind: 'app',
         meta: {
-          profile: 'claude',
-          agentKind: 'claude',
+          profile: 'zcode',
+          agentKind: 'zcode',
           appId: 'cli_test',
           pid: process.pid,
         },
       });
     });
 
-    await withProfileAndAppLocks(second, 'cli_new', 'codex', async () => {
+    await withProfileAndAppLocks(second, 'cli_new', 'zcode', async () => {
       expect(true).toBe(true);
     });
   });

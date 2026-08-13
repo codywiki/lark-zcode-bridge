@@ -597,7 +597,7 @@ function printBindFailedWarning(result: RunResult, appPaths?: AppPaths): void {
 
 function restartInstruction(profile?: string): string {
   const suffix = profile ? ` --profile ${profile}` : '';
-  return `Restart the current profile: lark-channel-bridge restart${suffix}; for foreground runs, press Ctrl+C and rerun lark-channel-bridge run${suffix}.`;
+  return `Restart the current profile: lark-zcode-bridge restart${suffix}; for foreground runs, press Ctrl+C and rerun lark-zcode-bridge run${suffix}.`;
 }
 
 function shouldUseLegacyLarkChannelSourceOverlay(output: string, appPaths: AppPaths): boolean {

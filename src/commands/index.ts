@@ -60,12 +60,6 @@ import {
   reduce,
   type RunState,
 } from '../card/run-state';
-import { formatRelTime, listRecentSessions, type SessionSummary } from '../session/history';
-import {
-  listCodexThreadHistory,
-  type CodexThreadHistoryEntry,
-  type ListCodexThreadHistoryOptions,
-} from '../session/codex-history';
 import type { SessionCatalog, SessionCatalogIdentity } from '../session/catalog';
 import { isAlive, readAndPrune, resolveTarget } from '../runtime/registry';
 import type { SessionStore } from '../session/store';
@@ -128,10 +122,6 @@ export interface CommandContext {
   processPool?: ProcessPool;
   runExecutor?: RunExecutor;
   controls: Controls;
-  codexHistoryProvider?: (
-    options: ListCodexThreadHistoryOptions,
-  ) => Promise<CodexThreadHistoryEntry[]>;
-  claudeHistoryProvider?: (cwd: string, limit: number) => Promise<SessionSummary[]>;
   /** Set when invoked from a CardKit 2.0 form submit. Keys are input `name`s. */
   formValue?: Record<string, unknown>;
   /** True when this invocation came from a card button click rather than a
@@ -144,11 +134,10 @@ type Handler = (args: string, ctx: CommandContext) => Promise<void>;
 
 interface ResumeCandidate {
   scopeId: string;
-  agentId: 'claude' | 'codex' | 'kimi';
+  agentId: 'zcode';
   cwdRealpath: string;
   policyFingerprint: string;
-  sessionId?: string;
-  threadId?: string;
+  sessionId: string;
   expiresAt: number;
 }
 
@@ -197,31 +186,21 @@ const ADMIN_COMMANDS = new Set([
   '/invite',
   '/remove',
 ]);
-const KIMI_GROUP_ADMIN_COMMANDS = new Set(['/new', '/reset', '/stop', '/timeout', '/model']);
-
 function isAdminCommand(cmd: string): boolean {
   return ADMIN_COMMANDS.has(cmd.startsWith('/') ? cmd : `/${cmd}`);
 }
 
 function requiresAdminCommand(cmd: string, ctx: CommandContext): boolean {
   const normalized = cmd.startsWith('/') ? cmd : `/${cmd}`;
-  return (
-    isAdminCommand(normalized) ||
-    (ctx.controls.profileConfig.agentKind === 'kimi' &&
-      ctx.chatMode !== 'p2p' &&
-      KIMI_GROUP_ADMIN_COMMANDS.has(normalized))
-  );
+  return isAdminCommand(normalized);
 }
 
 export async function tryHandleCommand(ctx: CommandContext): Promise<boolean> {
   const trimmed = ctx.msg.content.trim();
   if (!trimmed.startsWith('/')) return false;
-  if (
-    ctx.controls.profileConfig.agentKind === 'kimi' &&
-    trimmed.toLowerCase().startsWith('/skill:')
-  ) {
-    log.info('command', 'kimi-skill-deny', { sender: ctx.msg.senderId.slice(-6) });
-    await reply(ctx, '❌ Kimi 试点暂不允许通过 `/skill:` 激活本地 skill。');
+  if (trimmed.toLowerCase().startsWith('/skill:')) {
+    log.info('command', 'zcode-skill-deny', { sender: ctx.msg.senderId.slice(-6) });
+    await reply(ctx, '❌ ZCode bridge 暂不支持通过 `/skill:` 激活本地 skill。');
     return true;
   }
   const parts = trimmed.split(/\s+/);
@@ -325,9 +304,8 @@ function isAbsoluteOrTilde(p: string): boolean {
 }
 
 function storedWorkspaceFailureMessage(ctx: CommandContext, userVisible: string): string {
-  return ctx.controls.profileConfig.agentKind === 'kimi'
-    ? 'Kimi 当前工作目录不可用，或不在 Profile 授权工作目录及其子目录中。'
-    : userVisible;
+  void ctx;
+  return userVisible;
 }
 
 async function handleNew(args: string, ctx: CommandContext): Promise<void> {
@@ -378,9 +356,7 @@ async function handleNewChat(rawName: string, ctx: CommandContext): Promise<void
 
   // Welcome the user inside the new group with a hint about how to start.
   const welcome = sourceCwd
-    ? ctx.controls.profileConfig.agentKind === 'kimi'
-      ? '🎉 群已建好，已继承获授权工作目录。\n\n@我 + 任意消息开始对话。'
-      : `🎉 群已建好，cwd 继承自原群：\`${sourceCwd}\`\n\n@我 + 任意消息开始对话。`
+    ? `🎉 群已建好，cwd 继承自原群：\`${sourceCwd}\`\n\n@我 + 任意消息开始对话。`
     : '🎉 群已建好。\n\n@我 + 任意消息开始对话。';
   try {
     await ctx.channel.send(created.chatId, { markdown: welcome });
@@ -505,10 +481,6 @@ async function handleWsRemove(name: string, ctx: CommandContext): Promise<void> 
 
 async function handleDoc(args: string, ctx: CommandContext): Promise<void> {
   void args;
-  if (ctx.controls.profileConfig.agentKind === 'kimi') {
-    await reply(ctx, 'Kimi ACP 试点暂不处理云文档评论；请在已授权群聊或话题中 @bot。');
-    return;
-  }
   await reply(ctx, '云文档评论现在不需要绑定工作区；在支持的文档评论里 @bot 即可触发回复。');
 }
 
@@ -563,19 +535,7 @@ function listScopedWorkspaces(ctx: CommandContext): Record<string, string> {
 async function listAuthorizedScopedWorkspaces(
   ctx: CommandContext,
 ): Promise<Record<string, string>> {
-  const named = listScopedWorkspaces(ctx);
-  if (ctx.controls.profileConfig.agentKind !== 'kimi') return named;
-
-  const checked = await Promise.all(
-    Object.entries(named).map(async ([name, cwd]) => {
-      const workspace = await resolveAuthorizedWorkingDirectory(
-        cwd,
-        ctx.controls.profileConfig,
-      );
-      return workspace.ok ? ([name, workspace.cwdRealpath] as const) : undefined;
-    }),
-  );
-  return Object.fromEntries(checked.filter((entry) => entry !== undefined));
+  return listScopedWorkspaces(ctx);
 }
 
 async function handleResume(args: string, ctx: CommandContext): Promise<void> {
@@ -602,78 +562,25 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
 
-  if (ctx.controls.profileConfig.agentKind === 'codex') {
-    const identity = sessionCatalogIdentityForCwd(ctx, cwd);
-    const entry =
-      ctx.sessionCatalog && identity
-        ? ctx.sessionCatalog.activeFor(identity)
-        : undefined;
-    const history = identity ? await listCodexResumeHistory(ctx, cwd, limit) : [];
-    if (history.length > 0 && identity) {
-      const entries = history.map((thread) => {
-        const nonce = issueResumeCandidate(identity, { threadId: thread.threadId });
-        return {
-          sessionId: nonce,
-          preview: thread.name || thread.preview,
-          relTime: formatRelTime(thread.updatedAtMs),
-          detail: `Codex · ${thread.source}`,
-          current: thread.threadId === entry?.threadId,
-        };
-      });
-      const card = resumeCard(cwd, entries);
-      await ctx.channel.send(ctx.msg.chatId, { card }, { replyTo: ctx.msg.messageId });
-      return;
-    }
-    if (entry?.threadId && identity) {
-      const nonce = issueResumeCandidate(identity, { threadId: entry.threadId });
-      await reply(
-        ctx,
-        `当前 Codex thread 可恢复。\n使用 \`/resume use ${nonce}\` 恢复（10 分钟内有效）。`,
-      );
-      return;
-    }
-    const card = resumeCard(cwd, []);
-    await ctx.channel.send(ctx.msg.chatId, { card }, { replyTo: ctx.msg.messageId });
-    return;
-  }
-
-  if (ctx.controls.profileConfig.agentKind === 'kimi') {
-    const identity = sessionCatalogIdentityForCwd(ctx, cwd);
-    const entry =
-      ctx.sessionCatalog && identity
-        ? ctx.sessionCatalog.activeFor(identity)
-        : undefined;
-    if (entry?.sessionId && identity) {
-      const nonce = issueResumeCandidate(identity, { sessionId: entry.sessionId });
-      await reply(
-        ctx,
-        `当前 Kimi session 可恢复。\n使用 \`/resume use ${nonce}\` 恢复（10 分钟内有效）。`,
-      );
-      return;
-    }
-    await ctx.channel.send(
-      ctx.msg.chatId,
-      { card: resumeCard(cwd, []) },
-      { replyTo: ctx.msg.messageId },
+  // ZCode sessions live in ZCode's own store inside the isolated profile
+  // home with no documented listing API, so /resume offers the current
+  // catalog-tracked session for this cwd (no agent-side history browsing).
+  const identity = sessionCatalogIdentityForCwd(ctx, cwd);
+  const entry =
+    ctx.sessionCatalog && identity ? ctx.sessionCatalog.activeFor(identity) : undefined;
+  if (entry?.sessionId && identity) {
+    const nonce = issueResumeCandidate(identity, { sessionId: entry.sessionId });
+    await reply(
+      ctx,
+      `当前 ZCode session 可恢复。\n使用 \`/resume use ${nonce}\` 恢复（10 分钟内有效）。`,
     );
     return;
   }
-
-  const sessions = await listClaudeResumeHistory(ctx, cwd, limit);
-  const currentSession = ctx.sessions.getRaw(ctx.scope);
-  const identity = sessionCatalogIdentityForCwd(ctx, cwd);
-  const entries = sessions.map((s) => ({
-    sessionId: identity
-      ? issueResumeCandidate(identity, { sessionId: s.sessionId })
-      : s.sessionId,
-    displayId: s.sessionId,
-    preview: s.preview,
-    relTime: formatRelTime(s.mtime),
-    lineCount: s.lineCount,
-    current: s.sessionId === currentSession?.sessionId,
-  }));
-  const card = resumeCard(cwd, entries);
-  await ctx.channel.send(ctx.msg.chatId, { card }, { replyTo: ctx.msg.messageId });
+  await ctx.channel.send(
+    ctx.msg.chatId,
+    { card: resumeCard(cwd, []) },
+    { replyTo: ctx.msg.messageId },
+  );
 }
 
 async function applyResume(sessionId: string, ctx: CommandContext): Promise<void> {
@@ -694,29 +601,15 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
     const resolved = consumeResumeCandidate(sessionId, ctx.sessionCatalogIdentity);
     if (resolved) {
       ctx.activeRuns.interrupt(ctx.scope);
-      if (ctx.sessionCatalogIdentity.agentId === 'codex') {
-        ctx.sessionCatalog.upsertActive({
-          scopeId: ctx.sessionCatalogIdentity.scopeId,
-          agentId: 'codex',
-          cwdRealpath: ctx.sessionCatalogIdentity.cwdRealpath,
-          policyFingerprint: ctx.sessionCatalogIdentity.policyFingerprint,
-          threadId: resolved.threadId!,
-        });
-      } else {
-        ctx.sessionCatalog.upsertActive({
-          scopeId: ctx.sessionCatalogIdentity.scopeId,
-          agentId: ctx.sessionCatalogIdentity.agentId,
-          cwdRealpath: ctx.sessionCatalogIdentity.cwdRealpath,
-          policyFingerprint: ctx.sessionCatalogIdentity.policyFingerprint,
-          sessionId: resolved.sessionId!,
-        });
-        ctx.sessions.set(ctx.scope, resolved.sessionId!, ctx.sessionCatalogIdentity.cwdRealpath);
-      }
+      ctx.sessionCatalog.upsertActive({
+        scopeId: ctx.sessionCatalogIdentity.scopeId,
+        agentId: 'zcode',
+        cwdRealpath: ctx.sessionCatalogIdentity.cwdRealpath,
+        policyFingerprint: ctx.sessionCatalogIdentity.policyFingerprint,
+        sessionId: resolved.sessionId,
+      });
+      ctx.sessions.set(ctx.scope, resolved.sessionId, ctx.sessionCatalogIdentity.cwdRealpath);
       await reply(ctx, RESUME_APPLIED_REPLY);
-      return;
-    }
-    if (ctx.sessionCatalogIdentity.agentId === 'codex') {
-      await reply(ctx, '当前上下文不可恢复这个会话，请先用 `/resume` 重新生成恢复候选。');
       return;
     }
     const expected = entry?.sessionId;
@@ -725,24 +618,13 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
       return;
     }
     ctx.activeRuns.interrupt(ctx.scope);
-    if (
-      ctx.sessionCatalogIdentity.agentId === 'claude' ||
-      ctx.sessionCatalogIdentity.agentId === 'kimi'
-    ) {
-      ctx.sessions.set(ctx.scope, sessionId, ctx.sessionCatalogIdentity.cwdRealpath);
-    }
+    ctx.sessions.set(ctx.scope, sessionId, ctx.sessionCatalogIdentity.cwdRealpath);
     await reply(ctx, RESUME_APPLIED_REPLY);
     return;
   }
 
-  const agentKind = ctx.controls.profileConfig.agentKind;
-  if (agentKind === 'codex' || (agentKind === 'kimi' && ctx.sessionCatalog)) {
-    await reply(
-      ctx,
-      agentKind === 'codex'
-        ? '当前上下文没有可恢复的 Codex thread，请先在当前工作区完成一次运行。'
-        : '当前上下文没有符合当前工作区和权限策略的 Kimi session。',
-    );
+  if (ctx.sessionCatalog) {
+    await reply(ctx, '当前上下文没有符合当前工作区和权限策略的 ZCode session。');
     return;
   }
 
@@ -753,7 +635,7 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
 
 function issueResumeCandidate(
   identity: SessionCatalogIdentity,
-  target: { sessionId: string } | { threadId: string },
+  target: { sessionId: string },
 ): string {
   pruneResumeCandidates();
   let nonce = randomUUID().slice(0, 12);
@@ -782,9 +664,7 @@ function consumeResumeCandidate(
     candidate.agentId !== identity.agentId ||
     candidate.cwdRealpath !== identity.cwdRealpath ||
     candidate.policyFingerprint !== identity.policyFingerprint ||
-    ((identity.agentId === 'claude' || identity.agentId === 'kimi') &&
-      !candidate.sessionId) ||
-    (identity.agentId === 'codex' && !candidate.threadId)
+    candidate.sessionId !== undefined && candidate.sessionId.length === 0
   ) {
     return undefined;
   }
@@ -797,44 +677,6 @@ function pruneResumeCandidates(now = Date.now()): void {
   }
 }
 
-async function listClaudeResumeHistory(
-  ctx: CommandContext,
-  cwd: string,
-  limit: number,
-): Promise<SessionSummary[]> {
-  const provider = ctx.claudeHistoryProvider ?? listRecentSessions;
-  return provider(cwd, limit);
-}
-
-async function listCodexResumeHistory(
-  ctx: CommandContext,
-  cwd: string,
-  limit: number,
-): Promise<CodexThreadHistoryEntry[]> {
-  const codex = ctx.controls.profileConfig.codex;
-  const binary = codex?.binaryPath;
-  if (!binary) return [];
-
-  const provider = ctx.codexHistoryProvider ?? listCodexThreadHistory;
-  try {
-    return await provider({
-      binary,
-      cwd,
-      limit,
-      profileStateDir: commandProfilePaths(ctx).profileDir,
-      ...(codex.codexHome ? { codexHome: codex.codexHome } : {}),
-      ...(codex.inheritCodexHome !== undefined
-        ? { inheritCodexHome: codex.inheritCodexHome }
-        : {}),
-    });
-  } catch (err) {
-    log.warn('session', 'codex-history-failed', {
-      message: err instanceof Error ? err.message : String(err),
-    });
-    return [];
-  }
-}
-
 function effectiveWorkspaceCwd(ctx: CommandContext): string | undefined {
   return ctx.workspaces.cwdFor(ctx.scope) ?? ctx.controls.profileConfig.workspaces.default;
 }
@@ -842,13 +684,10 @@ function effectiveWorkspaceCwd(ctx: CommandContext): string | undefined {
 async function authorizedEffectiveWorkspaceCwd(
   ctx: CommandContext,
 ): Promise<string | undefined> {
-  const cwd = effectiveWorkspaceCwd(ctx);
-  if (!cwd) return undefined;
-  // Claude/Codex do not use Profile workspace-root authorization, and their
-  // legacy SessionStore keys may intentionally retain the configured path.
-  if (ctx.controls.profileConfig.agentKind !== 'kimi') return cwd;
-  const workspace = await resolveAuthorizedWorkingDirectory(cwd, ctx.controls.profileConfig);
-  return workspace.ok ? workspace.cwdRealpath : undefined;
+  // ZCode defaults to full-permission yolo mode and does not use Profile
+  // workspace-root authorization; legacy SessionStore keys may intentionally
+  // retain the configured path.
+  return effectiveWorkspaceCwd(ctx);
 }
 
 async function selectedResumeCwd(ctx: CommandContext): Promise<string | undefined> {
@@ -866,31 +705,15 @@ function sessionCatalogIdentityForCwd(
 function runtimeAccessStatus(
   profileConfig: ProfileConfig,
 ): { label: string; value: string } {
-  if (profileConfig.agentKind === 'claude') {
-    return {
-      label: 'permission',
-      value: accessToClaudePermissionMode(
-        profileConfig.permissions.defaultAccess,
-        profileConfig.permissions,
-      ),
-    };
-  }
-  if (profileConfig.agentKind === 'kimi') {
-    const access = profileConfig.permissions.defaultAccess;
-    return {
-      label: 'access',
-      value:
-        access === 'full'
-          ? 'full：Shell/编辑已开启，Kimi yolo，Seatbelt 已关闭；附件、MCP、Skill 仍禁用'
-          : access === 'workspace'
-            ? 'workspace：Shell/编辑限当前工作区，Kimi yolo + Seatbelt；附件、MCP、Skill 仍禁用'
-            : 'read-only：macOS Seatbelt + ACP 受控文本读取，default 模式与拒绝审批；写入、进程执行、附件、MCP、Skill 均禁用',
-    };
-  }
-  return {
-    label: 'sandbox',
-    value: `${profileConfig.sandbox.defaultMode}/${profileConfig.sandbox.maxMode}`,
-  };
+  const access = profileConfig.permissions.defaultAccess;
+  const mode = access === 'full' ? 'yolo' : access === 'workspace' ? 'build' : 'plan';
+  const detail =
+    access === 'full'
+      ? '完整权限：ZCode yolo，全目录读写、免审批'
+      : access === 'workspace'
+        ? '工作区读写：ZCode build'
+        : '只读规划：ZCode plan';
+  return { label: 'mode', value: `${mode}：${detail}` };
 }
 
 async function larkCliStatus(ctx: CommandContext): Promise<'app' | 'user-ready' | 'user-missing' | 'check-failed'> {
@@ -928,31 +751,15 @@ async function larkCliStatus(ctx: CommandContext): Promise<'app' | 'user-ready' 
 async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
   const cwd = await authorizedEffectiveWorkspaceCwd(ctx);
   const sess = ctx.sessions.getRaw(ctx.scope);
-  const isCodex = ctx.controls.profileConfig.agentKind === 'codex';
-  const isKimi = ctx.controls.profileConfig.agentKind === 'kimi';
-  const hideKimiGroupDetails = isKimi && ctx.chatMode !== 'p2p';
   const identity = cwd ? sessionCatalogIdentityForCwd(ctx, cwd) : undefined;
   const catalogEntry =
-    (isCodex || isKimi) && ctx.sessionCatalog && identity
-      ? ctx.sessionCatalog.activeFor(identity)
-      : undefined;
-  const sessionId = isCodex
-    ? catalogEntry?.threadId
-    : isKimi && ctx.sessionCatalog
-      ? catalogEntry?.sessionId
-      : sess?.sessionId;
+    ctx.sessionCatalog && identity ? ctx.sessionCatalog.activeFor(identity) : undefined;
+  const sessionId = catalogEntry?.sessionId ?? sess?.sessionId;
   const card = statusCard({
     profileName: ctx.controls.profile,
-    cwd: hideKimiGroupDetails ? undefined : cwd,
-    emptyCwdText: hideKimiGroupDetails ? '(群聊已隐藏)' : undefined,
-    sessionId: hideKimiGroupDetails ? undefined : sessionId,
-    emptySessionText: hideKimiGroupDetails
-      ? '(群聊已隐藏)'
-      : isCodex
-        ? '(未建立)'
-        : undefined,
-    sessionStale:
-      !hideKimiGroupDetails && !isCodex && Boolean(cwd && sess && sess.cwd !== cwd),
+    cwd,
+    sessionId,
+    sessionStale: Boolean(cwd && sess && sess.cwd !== cwd),
     agentName: ctx.agent.displayName,
     runtimeAccess: runtimeAccessStatus(ctx.controls.profileConfig),
     larkCliStatus: await larkCliStatus(ctx),
@@ -1083,14 +890,11 @@ function parseTimeoutTarget(input: string, currentScope: string): {
   };
 }
 
-const MODEL_USAGE =
-  '\n\n用法:\n- `/model` 查看当前 session 的模型覆盖\n- `/model <id> [minimal|low|medium|high|xhigh|ultra]` 设置当前 session 使用的模型,如 `/model gpt-5.5 ultra` / `/model sonnet`\n- `/model default` 清除覆盖,回退到 agent 默认模型\n\n_注:切换模型会结束当前可恢复会话,下一条消息会启动新 session_';
-const KIMI_MODEL_USAGE =
-  '\n\n用法:\n- `/model` 查看当前 session 的模型覆盖\n- `/model <id>` 设置当前 Kimi session 使用的模型,如 `/model kimi-k2` / `/model kimi/k2`\n- `/model default` 清除覆盖,回退到 Kimi profile 默认模型\n\n_注:切换模型会结束当前可恢复会话,下一条消息会启动新 session_';
+const ZCODE_MODEL_USAGE =
+  '\n\n用法:\n- `/model` 查看当前 session 的模型覆盖\n- `/model <id>` 设置模型,如 `/model glm-5.2` / `/model glm-5-turbo`(写入本 profile 独立配置)\n- `/model default` 清除覆盖,回退到 profile 默认模型\n\n_注:切换模型会结束当前可恢复会话,下一条消息会启动新 session_';
 async function handleModel(args: string, ctx: CommandContext): Promise<void> {
-  const isKimi = ctx.controls.profileConfig.agentKind === 'kimi';
   const trimmed = args.trim();
-  const usage = isKimi ? KIMI_MODEL_USAGE : MODEL_USAGE;
+  const usage = ZCODE_MODEL_USAGE;
 
   if (!trimmed) {
     const current = ctx.sessions.getModel(ctx.scope);
@@ -1118,13 +922,14 @@ async function handleModel(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
 
-  const parsed = parseModelArgs(trimmed, usage, { allowReasoningEffort: !isKimi });
+  // ZCode headless 不支持 per-run 推理强度参数，只切换模型 id。
+  const parsed = parseModelArgs(trimmed, usage, { allowReasoningEffort: false });
   if (!parsed.ok) {
     await reply(ctx, parsed.message);
     return;
   }
 
-  const modelPattern = isKimi ? /^[\w.:-]+(?:\/[\w.:-]+)*$/ : /^[\w.:-]+$/;
+  const modelPattern = /^[\w.:-]+(?:\/[\w.:-]+)*$/;
   if (!modelPattern.test(parsed.model)) {
     await reply(ctx, `❌ 模型 id 里出现了不像模型标识的字符。${usage}`);
     return;
@@ -1150,7 +955,7 @@ async function handleModel(args: string, ctx: CommandContext): Promise<void> {
 
 function parseModelArgs(
   input: string,
-  usage = MODEL_USAGE,
+  usage = ZCODE_MODEL_USAGE,
   options: { allowReasoningEffort?: boolean } = {},
 ):
   | { ok: true; model: string; reasoningEffort?: string }
@@ -1160,7 +965,7 @@ function parseModelArgs(
     return { ok: false, message: `❌ 用法错误。${usage}` };
   }
   if (parts[1] && options.allowReasoningEffort === false) {
-    return { ok: false, message: `❌ Kimi Code 当前只支持切换模型 id，不支持推理强度参数。${usage}` };
+    return { ok: false, message: `❌ ZCode headless 当前只支持切换模型 id，不支持推理强度参数。${usage}` };
   }
   const effort = parts[1] ? normalizeReasoningEffort(parts[1]) : undefined;
   if (parts[1] && !effort) {
@@ -1325,8 +1130,6 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
     chatMode: ctx.chatMode,
   });
   const isP2p = ctx.chatMode === 'p2p';
-  const hideKimiGroupWorkspace =
-    ctx.controls.profileConfig.agentKind === 'kimi' && !isP2p;
 
   const rateKey = `${ctx.controls.profile}:${ctx.controls.configPath}:${ctx.msg.senderId}`;
   const now = Date.now();
@@ -1358,11 +1161,7 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
       ctx,
       buildDoctorReport(ctx, {
         workspaceDisplay:
-          workspace.reason === 'outside-profile-root'
-            ? '(未授权)'
-            : hideKimiGroupWorkspace
-              ? '(群聊已隐藏)'
-              : '(不可用)',
+          workspace.reason === 'outside-profile-root' ? '(未授权)' : '(不可用)',
         workspaceCheck: `${workspace.reason}: ${storedWorkspaceFailureMessage(ctx, workspace.userVisible)} 工作目录不可用或未授权时只执行 self-check，不启动 agent。`,
         echoCheck: 'skipped',
       }),
@@ -1370,9 +1169,7 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
 
-  const workspaceCheck = hideKimiGroupWorkspace
-    ? 'ok (群聊已隐藏)'
-    : `ok (${workspace.cwdRealpath})`;
+  const workspaceCheck = `ok (${workspace.cwdRealpath})`;
 
   if (!ctx.runExecutor) {
     await reply(
@@ -1424,16 +1221,7 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
   const doctorReport = (echoCheck: string): string =>
     buildDoctorReport(ctx, {
       workspaceCheck,
-      policyCheck:
-        ctx.controls.profileConfig.agentKind === 'kimi'
-          ? policy.accessMode === 'full'
-            ? 'ok seatbelt=off acp-fs=read-write mode=yolo'
-            : policy.accessMode === 'workspace'
-              ? 'ok seatbelt=workspace acp-fs=read-write mode=yolo'
-              : 'ok seatbelt=required acp-fs=read-only mode=default'
-          : runtimeAccess.label === 'sandbox'
-          ? `ok sandbox=${policy.sandbox}`
-          : `ok ${runtimeAccess.label}=${policy.permissionMode}`,
+      policyCheck: `ok ${runtimeAccess.label}=${policy.accessMode}`,
       echoCheck,
     });
 
@@ -1465,13 +1253,7 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
       await reply(ctx, doctorReport('pool-full'));
       return;
     }
-    if (ctx.controls.profileConfig.agentKind === 'kimi') {
-      // Kimi startup/provider failures may carry local config, paths, or
-      // credentials. The detailed Error must not enter durable bridge logs.
-      log.warn('command', 'kimi-doctor-submit-failed', { step: 'doctor.submit' });
-    } else {
-      log.fail('command', err, { step: 'doctor.submit' });
-    }
+    log.fail('command', err, { step: 'doctor.submit' });
     reportMetric('command_fail', 1, { step: 'doctor.submit' });
     await reply(ctx, doctorReport('failed'));
     return;
@@ -1546,11 +1328,7 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
       });
     }
   } catch (err) {
-    if (ctx.controls.profileConfig.agentKind === 'kimi') {
-      log.warn('command', 'kimi-doctor-failed', { step: 'doctor' });
-    } else {
-      log.fail('command', err, { step: 'doctor' });
-    }
+    log.fail('command', err, { step: 'doctor' });
     reportMetric('command_fail', 1, { step: 'doctor' });
   } finally {
     doctorInFlightProfiles.delete(profileKey);
@@ -1570,11 +1348,7 @@ function buildDoctorReport(
   const queueLine = queue
     ? `${queue.active}/${queue.cap} active, ${queue.waiting} waiting`
     : 'unknown';
-  const hideKimiGroupWorkspace =
-    ctx.controls.profileConfig.agentKind === 'kimi' && ctx.chatMode !== 'p2p';
-  const cwd =
-    opts.workspaceDisplay ??
-    (hideKimiGroupWorkspace ? '(群聊已隐藏)' : effectiveWorkspaceCwd(ctx));
+  const cwd = opts.workspaceDisplay ?? effectiveWorkspaceCwd(ctx);
   const runtimeAccess = runtimeAccessStatus(ctx.controls.profileConfig);
   const access =
     ctx.msg.chatType === 'p2p'
@@ -1789,13 +1563,6 @@ async function handleInvite(args: string, ctx: CommandContext): Promise<void> {
   const tokens = args.trim().split(/\s+/).filter(Boolean).map((token) => token.toLowerCase());
 
   if (tokens.includes('all') && tokens.includes('group')) {
-    if (ctx.controls.profileConfig.agentKind === 'kimi') {
-      await reply(
-        ctx,
-        '❌ Kimi profile 禁止批量开放群聊。请仅在已确认无外部成员的指定话题群中使用 `/invite group`。',
-      );
-      return;
-    }
     const list = new Set(ctx.controls.profileConfig.access.allowedChats);
     let knownChats = ctx.controls.knownChats ?? [];
     if (knownChats.length === 0) {

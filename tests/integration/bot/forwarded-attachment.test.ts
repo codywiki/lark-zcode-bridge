@@ -34,7 +34,7 @@ describe('merge_forward attachment flow', () => {
     const channel = createFakeChannel();
     stubForwardedTree(channel);
     const resolve = vi.fn(async () => [htmlAttachment()]);
-    const controls = createControls(h, 'claude');
+    const controls = createControls(h);
 
     await runAgentBatch({
       channel: channelAs(channel),
@@ -69,33 +69,6 @@ describe('merge_forward attachment flow', () => {
     expect(prompt).toContain('/media/deadbeef.html');
   });
 
-  it('rejects a Kimi merge_forward carrying files before any download', async () => {
-    const h = await createHarness();
-    const channel = createFakeChannel();
-    stubForwardedTree(channel);
-    const resolve = vi.fn(async () => []);
-    const controls = createControls(h, 'kimi');
-
-    await runAgentBatch({
-      channel: channelAs(channel),
-      executor: h.executor,
-      sessions: h.sessions,
-      workspaces: h.workspaces,
-      media: { resolve } as unknown as MediaCache,
-      batch: [mergeForwardMessage()],
-      controls,
-      activePolicyFingerprints: new Map(),
-      scope: 'chat-1',
-      mode: 'p2p',
-    });
-
-    // Before the fix the forwarded file slipped past the text-only gate
-    // because the SDK reported zero resources for merge_forward parents.
-    expect(resolve).not.toHaveBeenCalled();
-    expect(h.agent.runOptions).toEqual([]);
-    expect(JSON.stringify(channel.sent.at(-1)?.content)).toContain('附件也未下载');
-  });
-
   it('downloads the file behind a quoted file message', async () => {
     const h = await createHarness();
     const channel = createFakeChannel();
@@ -111,7 +84,7 @@ describe('merge_forward attachment flow', () => {
       },
     ]) as FakeChannel['fetchRawMessage'];
     const resolve = vi.fn(async () => []);
-    const controls = createControls(h, 'claude');
+    const controls = createControls(h);
 
     await runAgentBatch({
       channel: channelAs(channel),
@@ -220,23 +193,12 @@ function channelAs(channel: FakeChannel): Parameters<typeof runAgentBatch>[0]['c
   return channel as unknown as Parameters<typeof runAgentBatch>[0]['channel'];
 }
 
-function createControls(
-  h: Awaited<ReturnType<typeof createHarness>>,
-  agentKind: 'claude' | 'kimi',
-): Controls {
-  const profileConfig =
-    agentKind === 'kimi'
-      ? createDefaultProfileConfig({
-          agentKind: 'kimi',
-          accounts: { app: { id: 'cli_test', secret: '${APP_SECRET}', tenant: 'feishu' } },
-          kimi: { binaryPath: 'kimi' },
-        })
-      : h.profileConfig;
+function createControls(h: Awaited<ReturnType<typeof createHarness>>): Controls {
   return {
-    profile: agentKind,
+    profile: 'zcode',
     profileConfig: {
-      ...profileConfig,
-      workspaces: { ...profileConfig.workspaces, default: h.workspace },
+      ...h.profileConfig,
+      workspaces: { ...h.profileConfig.workspaces, default: h.workspace },
     },
     botOwnerId: 'ou-owner',
     ownerRefreshState: 'ok',
@@ -244,7 +206,7 @@ function createControls(
     restart: vi.fn(async () => {}),
     exit: vi.fn(async () => {}),
     configPath: join(h.tmp.profile, 'config.json'),
-    cfg: profileConfig,
+    cfg: h.profileConfig,
     processId: 'proc-1',
   } satisfies Controls;
 }
@@ -260,8 +222,8 @@ async function createHarness(): Promise<{
 }> {
   const tmp = await createTmpProfile('forwarded-attachment-');
   const agent = new FakeAgentAdapter({
-    id: 'codex',
-    displayName: 'Codex',
+    id: 'zcode',
+    displayName: 'ZCode',
     events: [{ type: 'done', terminationReason: 'normal' }],
   });
   const executor = new RunExecutor({
@@ -272,9 +234,9 @@ async function createHarness(): Promise<{
     now: () => 1000,
   });
   const profileConfig = createDefaultProfileConfig({
-    agentKind: 'codex',
+    agentKind: 'zcode',
     accounts: { app: { id: 'cli_test', secret: '${APP_SECRET}', tenant: 'feishu' } },
-    codex: { binaryPath: '/usr/local/bin/codex' },
+    zcode: { runtimePath: join(tmp.root, 'zcode.cjs') },
   });
   const workspace = await realpath(tmp.workspace);
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));

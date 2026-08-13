@@ -1,6 +1,6 @@
 import { mkdir, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { createBootstrapCodexConfig, createBootstrapKimiConfig } from '../profile-bootstrap';
+import { createBootstrapZcodeConfig } from '../profile-bootstrap';
 import { promptLine } from '../prompt';
 import { stopProcessEntry } from './ps';
 import {
@@ -33,8 +33,8 @@ interface LegacyShape {
 /**
  * One-shot migrator for two pre-0.1.11 changes:
  *
- *  1. Path: ~/.config/lark-channel-bridge/ + ~/.cache/lark-channel-bridge/
- *     → ~/.lark-channel/
+ *  1. Path: ~/.config/lark-zcode-bridge/ + ~/.cache/lark-zcode-bridge/
+ *     → ~/.lark-zcode-bridge/
  *  2. Shape: { app: {...} } → { accounts: { app: {...} } }
  *
  * Idempotent — running on an already-migrated setup is a no-op.
@@ -43,20 +43,15 @@ export async function runMigrate(opts: MigrateOptions): Promise<void> {
   const configPath = opts.config ?? paths.configFile;
   await migrateLegacyPaths();
   await migrateConfigShape(configPath);
-  const agentKind =
-    agentKindFromString(opts.agent) ??
-    (opts.profile === 'codex' ? 'codex' : opts.profile === 'kimi' ? 'kimi' : undefined);
+  const agentKind = agentKindFromString(opts.agent);
   const needsV2Migration = await hasLegacyProfileConfig(configPath);
   const result = await migrateProfileV2WithActiveBridgePrompt({
     rootDir: dirname(configPath),
     configFile: configPath,
     profile: opts.profile,
     ...(agentKind ? { agentKind } : {}),
-    ...(needsV2Migration && agentKind === 'codex'
-      ? { codex: await createBootstrapCodexConfig(undefined) }
-      : {}),
-    ...(needsV2Migration && agentKind === 'kimi'
-      ? { kimi: await createBootstrapKimiConfig(undefined) }
+    ...(needsV2Migration
+      ? { zcode: await createBootstrapZcodeConfig(undefined) }
       : {}),
   }, opts);
   if (!result) return;

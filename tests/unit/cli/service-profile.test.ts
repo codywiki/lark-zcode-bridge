@@ -100,7 +100,7 @@ describe('profile-aware service commands', () => {
             tenant: 'feishu',
           },
         },
-        agentKind: 'codex',
+        agentKind: 'zcode',
       },
     });
     mocks.checkRuntimeLock.mockResolvedValue({ locked: false });
@@ -125,7 +125,7 @@ describe('profile-aware service commands', () => {
           pid: 12345,
           appId: 'cli_codex',
           profileName: 'codex-dev',
-          agentKind: 'codex',
+          agentKind: 'zcode',
           botName: 'Codex Bot',
         }),
       ]);
@@ -158,7 +158,7 @@ describe('profile-aware service commands', () => {
             tenant: 'feishu',
           },
         },
-        agentKind: 'codex',
+        agentKind: 'zcode',
       }),
       appPaths: expect.objectContaining({
         profile: 'codex-dev',
@@ -177,7 +177,7 @@ describe('profile-aware service commands', () => {
     expect(mocks.adapter.install).toHaveBeenCalled();
     expect(mocks.adapter.start).toHaveBeenCalled();
     expect(lines).toContain(
-      '✓ 已启动  bot: Codex Bot (cli_codex)  agent: Codex CLI (codex)  进程: p1',
+      '✓ 已启动  bot: Codex Bot (cli_codex)  agent: ZCode CLI (zcode)  进程: p1',
     );
   });
 
@@ -195,7 +195,7 @@ describe('profile-aware service commands', () => {
           tenant: 'feishu',
         },
       },
-      agentKind: 'codex',
+      agentKind: 'zcode',
       secrets: {
         providers: {
           bridge: {
@@ -227,7 +227,7 @@ describe('profile-aware service commands', () => {
               tenant: 'feishu',
             },
           },
-          agentKind: 'codex',
+          agentKind: 'zcode',
         },
       })
       .mockResolvedValueOnce({
@@ -264,7 +264,7 @@ describe('profile-aware service commands', () => {
           pid: 12345,
           appId: 'cli_codex',
           profileName: 'codex-dev',
-          agentKind: 'codex',
+          agentKind: 'zcode',
           botName: 'Codex Bot',
         }),
       ]);
@@ -305,7 +305,7 @@ describe('profile-aware service commands', () => {
         kind: 'profile',
         target: '/tmp/lark-channel-home/registry/locks/profile/codex-dev.lock',
         profile: 'codex-dev',
-        agentKind: 'codex',
+        agentKind: 'zcode',
         pid: 2468,
         startedAt: '2026-05-26T10:50:33.082Z',
       },
@@ -318,7 +318,7 @@ describe('profile-aware service commands', () => {
           pid: 12345,
           appId: 'cli_codex',
           profileName: 'codex-dev',
-          agentKind: 'codex',
+          agentKind: 'zcode',
           botName: 'Codex Bot',
         }),
       ]);
@@ -344,7 +344,7 @@ describe('profile-aware service commands', () => {
       kind: 'profile' as const,
       target: '/tmp/lark-channel-home/registry/locks/profile/codex-dev.lock',
       profile: 'codex-dev',
-      agentKind: 'codex' as const,
+      agentKind: 'zcode' as const,
       pid: 2468,
       startedAt: '2026-05-26T10:50:33.082Z',
     };
@@ -360,7 +360,7 @@ describe('profile-aware service commands', () => {
           pid: 12345,
           appId: 'cli_codex',
           profileName: 'codex-dev',
-          agentKind: 'codex',
+          agentKind: 'zcode',
           botName: 'Codex Bot',
         }),
       ]);
@@ -393,7 +393,7 @@ describe('profile-aware service commands', () => {
           kind: 'app',
           target: '/tmp/lark-channel-home/registry/locks/app/cli_codex.lock',
           profile: 'codex-dev',
-          agentKind: 'codex',
+          agentKind: 'zcode',
           appId: 'cli_codex',
           pid: 2468,
           startedAt: '2026-05-26T10:50:33.085Z',
@@ -428,7 +428,7 @@ describe('profile-aware service commands', () => {
             tenant: 'feishu',
           },
         },
-        agentKind: 'claude',
+        agentKind: 'zcode',
       },
     });
     mocks.readAndPrune
@@ -439,13 +439,13 @@ describe('profile-aware service commands', () => {
           pid: 12346,
           appId: 'cli_claude',
           profileName: 'claude',
-          agentKind: 'claude',
+          agentKind: 'zcode',
           botName: 'Claude Bot',
         }),
       ]);
 
     await runServiceStart({
-      agent: 'claude',
+      agent: 'zcode',
       workspace: '/repo',
       appId: 'cli_claude',
       appSecret: 'manual-secret',
@@ -455,7 +455,7 @@ describe('profile-aware service commands', () => {
 
     expect(mocks.resolveProfileRuntime).toHaveBeenNthCalledWith(1, expect.objectContaining({
       profile: undefined,
-      agent: 'claude',
+      agent: 'zcode',
       workspace: '/repo',
       appId: 'cli_claude',
       appSecret: 'manual-secret',
@@ -513,7 +513,7 @@ function processEntry(overrides: Partial<ProcessEntry>): ProcessEntry {
     appId: 'cli_test',
     tenant: 'feishu',
     profileName: 'claude',
-    agentKind: 'claude',
+    agentKind: 'zcode',
     configPath: '/tmp/config.json',
     startedAt: new Date().toISOString(),
     version: '0.1.32',

@@ -19,79 +19,73 @@ afterEach(async () => {
 });
 
 describe('first-run profile bootstrap', () => {
-  it('creates a Codex profile with a default workspace and inherited user Codex home', async () => {
+  it('creates a ZCode profile with a default workspace', async () => {
     const root = await makeRoot();
     const workspace = join(root, 'workspace');
-    const profileDir = join(root, 'profiles', 'codex-dev');
     await mkdir(workspace, { recursive: true });
-    const codex = await writeVersionExecutable(root, 'codex', 'codex 1.2.3');
+    const runtime = await writeVersionExecutable(root, 'zcode.cjs', 'zcode 0.16.3');
 
     const profile = await createBootstrapProfileConfig({
-      agentKind: 'codex',
-      accounts: { app: { id: 'cli_codex', secret: '${APP_SECRET}', tenant: 'feishu' } },
+      agentKind: 'zcode',
+      accounts: { app: { id: 'cli_zcode', secret: '${APP_SECRET}', tenant: 'feishu' } },
       workspace,
-      codexBinaryPath: codex,
-      profileDir,
+      zcodeRuntimePath: runtime,
     });
 
     const workspaceRealpath = await realpath(workspace);
-    expect(profile.agentKind).toBe('codex');
+    expect(profile.agentKind).toBe('zcode');
     expect(profile.workspaces).toEqual({ default: workspaceRealpath });
-    expect(profile.codex).toMatchObject({
-      binaryPath: codex,
-      inheritCodexHome: true,
-    });
-    expect(profile.codex?.realpath).toBeUndefined();
-    expect(profile.codex?.version).toBeUndefined();
-    expect(profile.codex?.sha256).toBeUndefined();
+    expect(profile.zcode).toEqual({ runtimePath: runtime });
     expect(profile.sandbox).toMatchObject({
       defaultMode: 'danger-full-access',
       maxMode: 'danger-full-access',
     });
-    await expect(stat(join(profileDir, 'codex-home'))).rejects.toMatchObject({ code: 'ENOENT' });
+    // Bootstrap only records the runtime path; the isolated profile home is
+    // created lazily on first run, not at profile creation time.
+    await expect(stat(join(root, 'profiles', 'zcode-home'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
   });
 
-  it('creates a read-only Kimi profile from LARK_CHANNEL_KIMI_BIN', async () => {
+  it('falls back to LARK_ZCODE_BRIDGE_RUNTIME_PATH when no runtime path is given', async () => {
     const root = await makeRoot();
     const workspace = join(root, 'workspace');
     await mkdir(workspace, { recursive: true });
-    const kimi = await writeVersionExecutable(root, 'kimi', 'kimi 0.29.2');
-    const previous = process.env.LARK_CHANNEL_KIMI_BIN;
-    process.env.LARK_CHANNEL_KIMI_BIN = kimi;
+    const runtime = await writeVersionExecutable(root, 'zcode.cjs', 'zcode 0.16.3');
+    const previous = process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH;
+    process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH = runtime;
 
     try {
       const profile = await createBootstrapProfileConfig({
-        agentKind: 'kimi',
-        accounts: { app: { id: 'cli_kimi', secret: '${APP_SECRET}', tenant: 'feishu' } },
+        agentKind: 'zcode',
+        accounts: { app: { id: 'cli_zcode', secret: '${APP_SECRET}', tenant: 'feishu' } },
         workspace,
       });
 
-      expect(profile.agentKind).toBe('kimi');
-      expect(profile.kimi).toEqual({ binaryPath: kimi, defaultModel: 'kimi-code/k3' });
+      expect(profile.agentKind).toBe('zcode');
+      expect(profile.zcode).toEqual({ runtimePath: runtime });
       expect(profile.permissions).toEqual({
-        defaultAccess: 'read-only',
-        maxAccess: 'read-only',
+        defaultAccess: 'full',
+        maxAccess: 'full',
       });
     } finally {
       if (previous === undefined) {
-        delete process.env.LARK_CHANNEL_KIMI_BIN;
+        delete process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH;
       } else {
-        process.env.LARK_CHANNEL_KIMI_BIN = previous;
+        process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH = previous;
       }
     }
   });
 
   it('creates a profile without requiring a user workspace', async () => {
     const root = await makeRoot();
-    const defaultWorkspace = join(root, 'managed-workspaces', 'codex-dev', 'default');
-    const profileDir = join(root, 'profiles', 'codex-dev');
-    const codex = await writeVersionExecutable(root, 'codex', 'codex 1.2.3');
+    const defaultWorkspace = join(root, 'managed-workspaces', 'zcode-dev', 'default');
+    const runtime = await writeVersionExecutable(root, 'zcode.cjs', 'zcode 0.16.3');
 
     const profile = await createBootstrapProfileConfig({
-      agentKind: 'codex',
-      accounts: { app: { id: 'cli_codex', secret: '${APP_SECRET}', tenant: 'feishu' } },
-      codexBinaryPath: codex,
-      profileDir,
+      agentKind: 'zcode',
+      accounts: { app: { id: 'cli_zcode', secret: '${APP_SECRET}', tenant: 'feishu' } },
+      zcodeRuntimePath: runtime,
       defaultWorkspace,
     });
 
@@ -99,22 +93,22 @@ describe('first-run profile bootstrap', () => {
     expect(profile.workspaces.default).toBe(defaultWorkspaceRealpath);
   });
 
-  it('reports missing Codex bootstrap binaries as agent preflight diagnostics', async () => {
+  it('reports a missing ZCode bootstrap runtime as an agent preflight diagnostic', async () => {
     const root = await makeRoot();
-    const missing = join(root, 'missing-codex');
+    const missing = join(root, 'missing-zcode.cjs');
 
     await expect(
       createBootstrapProfileConfig({
-        agentKind: 'codex',
-        accounts: { app: { id: 'cli_codex', secret: '${APP_SECRET}', tenant: 'feishu' } },
-        codexBinaryPath: missing,
+        agentKind: 'zcode',
+        accounts: { app: { id: 'cli_zcode', secret: '${APP_SECRET}', tenant: 'feishu' } },
+        zcodeRuntimePath: missing,
       }),
     ).rejects.toMatchObject({
       diagnostic: {
         code: 'agent-binary-not-found',
-        agentId: 'codex',
-        agentName: 'Codex CLI',
-        command: missing,
+        agentId: 'zcode',
+        agentName: 'ZCode CLI',
+        command: 'zcode',
         binaryPath: missing,
       },
     });
@@ -124,12 +118,14 @@ describe('first-run profile bootstrap', () => {
     const root = await makeRoot();
     const file = join(root, 'not-a-dir');
     await writeFile(file, 'x', 'utf8');
+    const runtime = await writeVersionExecutable(root, 'zcode.cjs', 'zcode 0.16.3');
 
     await expect(
       createBootstrapProfileConfig({
-        agentKind: 'claude',
-        accounts: { app: { id: 'cli_claude', secret: '${APP_SECRET}', tenant: 'feishu' } },
+        agentKind: 'zcode',
+        accounts: { app: { id: 'cli_zcode', secret: '${APP_SECRET}', tenant: 'feishu' } },
         workspace: file,
+        zcodeRuntimePath: runtime,
       }),
     ).rejects.toThrow(/路径不是目录/);
   });
@@ -138,107 +134,75 @@ describe('first-run profile bootstrap', () => {
     const root = await makeRoot();
     const workspace = join(root, 'workspace');
     await mkdir(workspace, { recursive: true });
+    const runtime = await writeVersionExecutable(root, 'zcode.cjs', 'zcode 0.16.3');
 
     const profile = await createBootstrapProfileConfig({
-      agentKind: 'claude',
-      accounts: { app: { id: 'cli_claude', secret: '${APP_SECRET}', tenant: 'feishu' } },
+      agentKind: 'zcode',
+      accounts: { app: { id: 'cli_zcode', secret: '${APP_SECRET}', tenant: 'feishu' } },
       workspace,
+      zcodeRuntimePath: runtime,
     });
 
     await expect(realpath(workspace)).resolves.toBe(profile.workspaces.default);
   });
 
   it('leaves workspaces empty when neither explicit nor managed workspace is provided', async () => {
+    const root = await makeRoot();
+    const runtime = await writeVersionExecutable(root, 'zcode.cjs', 'zcode 0.16.3');
+
     await expect(
       createBootstrapProfileConfig({
-        agentKind: 'claude',
-        accounts: { app: { id: 'cli_claude', secret: '${APP_SECRET}', tenant: 'feishu' } },
+        agentKind: 'zcode',
+        accounts: { app: { id: 'cli_zcode', secret: '${APP_SECRET}', tenant: 'feishu' } },
+        zcodeRuntimePath: runtime,
       }),
     ).resolves.toMatchObject({
       workspaces: {},
     });
   });
 
-  it('detects available agents from PATH without inventing missing tools', async () => {
+  it('detects the ZCode runtime from LARK_ZCODE_BRIDGE_RUNTIME_PATH', async () => {
     const root = await makeRoot();
-    const codex = await writeVersionExecutable(root, 'codex', 'codex 1.2.3');
-    const oldPath = process.env.PATH;
-    const oldClaude = process.env.LARK_CHANNEL_CLAUDE_BIN;
-    const oldCodex = process.env.LARK_CHANNEL_CODEX_BIN;
-    const oldKimi = process.env.LARK_CHANNEL_KIMI_BIN;
-    process.env.PATH = root;
-    process.env.LARK_CHANNEL_CLAUDE_BIN = 'missing-claude';
-    process.env.LARK_CHANNEL_CODEX_BIN = process.platform === 'win32' ? codex : 'codex';
-    process.env.LARK_CHANNEL_KIMI_BIN = 'missing-kimi';
+    const runtime = await writeVersionExecutable(root, 'zcode.cjs', 'zcode 0.16.3');
+    const oldRuntime = process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH;
+    process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH = runtime;
     try {
       await expect(detectInstalledAgents()).resolves.toEqual([
-        { kind: 'codex', binaryPath: codex },
+        { kind: 'zcode', binaryPath: runtime },
       ]);
     } finally {
-      process.env.PATH = oldPath;
-      if (oldClaude === undefined) {
-        delete process.env.LARK_CHANNEL_CLAUDE_BIN;
+      if (oldRuntime === undefined) {
+        delete process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH;
       } else {
-        process.env.LARK_CHANNEL_CLAUDE_BIN = oldClaude;
-      }
-      if (oldCodex === undefined) {
-        delete process.env.LARK_CHANNEL_CODEX_BIN;
-      } else {
-        process.env.LARK_CHANNEL_CODEX_BIN = oldCodex;
-      }
-      if (oldKimi === undefined) {
-        delete process.env.LARK_CHANNEL_KIMI_BIN;
-      } else {
-        process.env.LARK_CHANNEL_KIMI_BIN = oldKimi;
+        process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH = oldRuntime;
       }
     }
   });
 
-  it('detects Kimi from LARK_CHANNEL_KIMI_BIN', async () => {
+  it('detects no agents when the ZCode runtime is missing', async () => {
     const root = await makeRoot();
-    const kimi = await writeVersionExecutable(root, 'kimi', 'kimi 0.29.2');
-    const oldPath = process.env.PATH;
-    const oldClaude = process.env.LARK_CHANNEL_CLAUDE_BIN;
-    const oldCodex = process.env.LARK_CHANNEL_CODEX_BIN;
-    const oldKimi = process.env.LARK_CHANNEL_KIMI_BIN;
-    process.env.PATH = root;
-    process.env.LARK_CHANNEL_CLAUDE_BIN = 'missing-claude';
-    process.env.LARK_CHANNEL_CODEX_BIN = 'missing-codex';
-    process.env.LARK_CHANNEL_KIMI_BIN = kimi;
-
+    const oldRuntime = process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH;
+    process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH = join(root, 'missing-zcode.cjs');
     try {
-      await expect(detectInstalledAgents()).resolves.toEqual([
-        { kind: 'kimi', binaryPath: kimi },
-      ]);
+      await expect(detectInstalledAgents()).resolves.toEqual([]);
     } finally {
-      process.env.PATH = oldPath;
-      if (oldClaude === undefined) {
-        delete process.env.LARK_CHANNEL_CLAUDE_BIN;
+      if (oldRuntime === undefined) {
+        delete process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH;
       } else {
-        process.env.LARK_CHANNEL_CLAUDE_BIN = oldClaude;
-      }
-      if (oldCodex === undefined) {
-        delete process.env.LARK_CHANNEL_CODEX_BIN;
-      } else {
-        process.env.LARK_CHANNEL_CODEX_BIN = oldCodex;
-      }
-      if (oldKimi === undefined) {
-        delete process.env.LARK_CHANNEL_KIMI_BIN;
-      } else {
-        process.env.LARK_CHANNEL_KIMI_BIN = oldKimi;
+        process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH = oldRuntime;
       }
     }
   });
 
   it('resolves Windows-style PATHEXT command shims from PATH', async () => {
     const root = await makeRoot();
-    await writeExecutable(root, 'codex.cmd', '@echo off\r\necho codex 1.2.3\r\n');
+    await writeExecutable(root, 'zcode.cmd', '@echo off\r\necho zcode 0.16.3\r\n');
     const oldPath = process.env.PATH;
     const oldPathExt = process.env.PATHEXT;
     process.env.PATH = root;
     process.env.PATHEXT = '.cmd;.exe';
     try {
-      await expect(resolveExecutablePath('codex')).resolves.toBe(join(root, 'codex.cmd'));
+      await expect(resolveExecutablePath('zcode')).resolves.toBe(join(root, 'zcode.cmd'));
     } finally {
       process.env.PATH = oldPath;
       if (oldPathExt === undefined) {

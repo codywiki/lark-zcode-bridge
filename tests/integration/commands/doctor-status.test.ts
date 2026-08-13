@@ -7,7 +7,6 @@ import { ProcessPool } from '../../../src/bot/process-pool.js';
 import { tryHandleCommand, type CommandContext, type Controls } from '../../../src/commands/index.js';
 import {
   createDefaultProfileConfig,
-  type AgentKind,
   type ProfileConfig,
 } from '../../../src/config/profile-schema.js';
 import type { AccessMode } from '../../../src/config/permissions.js';
@@ -63,8 +62,8 @@ describe('/status and /doctor diagnostics', () => {
     expect(status).toContain('1/1 active');
     expect(status).toContain('owner API');
     expect(status).toContain('profile');
-    expect(status).toContain('claude');
-    expect(status).toContain('permission');
+    expect(status).toContain('zcode');
+    expect(status).toContain('mode');
     expect(status).toContain('plan');
     expect(status).not.toContain('bypassPermissions');
   });
@@ -95,16 +94,16 @@ describe('/status and /doctor diagnostics', () => {
     const output = lastStreamCardJson(h.channel);
     expect(output).toContain('self-check');
     expect(output).toContain('profile');
-    expect(output).toContain('claude');
+    expect(output).toContain('zcode');
     expect(output).toContain('workspace check');
-    expect(output).toContain('policy check: ok permission=plan');
+    expect(output).toContain('policy check: ok mode=read-only');
     expect(output).not.toContain('permission=bypassPermissions');
     expect(output).toContain('agent echo check');
     expect(output).toContain('OK');
   });
 
-  it('uses the dedicated Codex final answer for the doctor echo check', async () => {
-    const h = await createHarness({ configuredWorkspace: true, agentKind: 'codex' });
+  it('uses the final answer event for the doctor echo check', async () => {
+    const h = await createHarness({ configuredWorkspace: true });
     h.agent.setEvents([
       { type: 'text', delta: 'progress that is not the echo result' },
       { type: 'final_text', content: 'OK' },
@@ -149,111 +148,61 @@ describe('/status and /doctor diagnostics', () => {
     expect(lastMarkdownOrText(h.channel)).toContain('pool-full');
   });
 
-  it('reports the enforced Kimi Seatbelt and ACP read-only boundary', async () => {
-    const h = await createHarness({ configuredWorkspace: true, agentKind: 'kimi' });
-
-    await expect(h.run('/status')).resolves.toBe(true);
-    const status = JSON.stringify(lastContent(h.channel));
-    expectKimiSafetyNotice(status);
-    expect(status).not.toContain('不等同于操作系统只读沙箱');
-
-    await expect(h.run('/doctor')).resolves.toBe(true);
-    const doctor = lastStreamCardJson(h.channel);
-    expectKimiSafetyNotice(doctor);
-    expect(doctor).toContain('policy check: ok seatbelt=required acp-fs=read-only mode=default');
-  });
-
-  it('reports and executes the configured Kimi full-access policy', async () => {
+  it('reports and executes the configured full-access policy', async () => {
     const h = await createHarness({
       configuredWorkspace: true,
-      agentKind: 'kimi',
       accessMode: 'full',
     });
 
     await expect(h.run('/status')).resolves.toBe(true);
     const status = JSON.stringify(lastContent(h.channel));
-    expect(status).toContain('full：Shell/编辑已开启');
-    expect(status).toContain('Kimi yolo');
-    expect(status).toContain('Seatbelt 已关闭');
+    expect(status).toContain('yolo');
+    expect(status).toContain('完整权限');
 
     await expect(h.run('/doctor')).resolves.toBe(true);
     expect(h.agent.runOptions.at(-1)?.sandbox).toBe('danger-full-access');
-    expect(lastStreamCardJson(h.channel)).toContain(
-      'policy check: ok seatbelt=off acp-fs=read-write mode=yolo',
-    );
+    expect(lastStreamCardJson(h.channel)).toContain('policy check: ok mode=full');
   });
 
-  it('skips the Kimi echo check when a legacy cwd is outside the profile root', async () => {
-    const h = await createHarness({ configuredWorkspace: true, agentKind: 'kimi' });
-    const outside = join(h.tmp.root, 'outside-workspace');
-    await mkdir(outside, { recursive: true });
-    h.workspaces.setCwd('chat-1', outside);
-
-    await expect(h.run('/status')).resolves.toBe(true);
-    expect(JSON.stringify(lastContent(h.channel))).not.toContain(outside);
-
-    await expect(h.run('/doctor')).resolves.toBe(true);
-
-    expect(h.agent.runOptions).toHaveLength(0);
-    const doctor = lastMarkdownOrText(h.channel);
-    expect(doctor).toContain('outside-profile-root');
-    expect(doctor).toContain('Profile 授权工作目录及其子目录');
-    expect(doctor).not.toContain(outside);
-    expect(doctor).toContain('skipped');
-  });
-
-  it('runs the Kimi echo check from an additional authorized root', async () => {
-    const h = await createHarness({ configuredWorkspace: true, agentKind: 'kimi' });
-    const additionalRoot = join(h.tmp.root, 'authorized-project');
-    const additionalCwd = join(additionalRoot, 'packages', 'app');
-    await mkdir(additionalCwd, { recursive: true });
-    h.controls.profileConfig.workspaces.allowedRoots = [await realpath(additionalRoot)];
-    h.workspaces.setCwd('chat-1', additionalCwd);
+  it('runs the echo check from any accessible cwd outside the default workspace', async () => {
+    const h = await createHarness({ configuredWorkspace: true });
+    const otherCwd = join(h.tmp.root, 'other-project', 'packages', 'app');
+    await mkdir(otherCwd, { recursive: true });
+    h.workspaces.setCwd('chat-1', otherCwd);
 
     await expect(h.run('/doctor')).resolves.toBe(true);
 
     expect(h.agent.runOptions).toHaveLength(1);
-    expect(h.agent.runOptions[0]?.cwd).toBe(await realpath(additionalCwd));
+    expect(h.agent.runOptions[0]?.cwd).toBe(await realpath(otherCwd));
     expect(lastStreamCardJson(h.channel)).toContain('workspace check: ok');
   });
 
-  it('redacts Kimi workspace paths from group-visible doctor early reports', async () => {
-    const inaccessible = await createHarness({
-      configuredWorkspace: true,
-      agentKind: 'kimi',
-    });
-    const missingPath = join(inaccessible.tmp.root, 'missing-sensitive-project');
-    inaccessible.workspaces.setCwd('chat-1', missingPath);
+  it('reports an inaccessible cwd without starting the agent, even in groups', async () => {
+    const h = await createHarness({ configuredWorkspace: true });
+    const missingPath = join(h.tmp.root, 'missing-sensitive-project');
+    h.workspaces.setCwd('chat-1', missingPath);
 
-    await expect(
-      inaccessible.run('/doctor', { chatMode: 'group' }),
-    ).resolves.toBe(true);
+    await expect(h.run('/doctor', { chatMode: 'group' })).resolves.toBe(true);
 
-    const inaccessibleReport = lastMarkdownOrText(inaccessible.channel);
-    expect(inaccessibleReport).toContain('(群聊已隐藏)');
-    expect(inaccessibleReport).toContain('path-inaccessible');
-    expect(inaccessibleReport).not.toContain(missingPath);
-    expect(inaccessible.agent.runOptions).toHaveLength(0);
-
-    const noExecutor = await createHarness({
-      configuredWorkspace: true,
-      agentKind: 'kimi',
-    });
-    const authorized = await realpath(noExecutor.tmp.workspace);
-    await expect(
-      noExecutor.run('/doctor', { chatMode: 'group', withRunExecutor: false }),
-    ).resolves.toBe(true);
-
-    const noExecutorReport = lastMarkdownOrText(noExecutor.channel);
-    expect(noExecutorReport).toContain('workspace: (群聊已隐藏)');
-    expect(noExecutorReport).toContain('workspace check: ok (群聊已隐藏)');
-    expect(noExecutorReport).not.toContain(authorized);
-    expect(noExecutor.agent.runOptions).toHaveLength(0);
+    const report = lastMarkdownOrText(h.channel);
+    expect(report).toContain('path-inaccessible');
+    expect(h.agent.runOptions).toHaveLength(0);
   });
 
-  it('does not persist secret-bearing Kimi doctor startup errors', async () => {
-    const h = await createHarness({ configuredWorkspace: true, agentKind: 'kimi' });
-    const secret = 'TOP-SECRET-KIMI-DOCTOR-PROVIDER-ERROR';
+  it('reports a missing run executor without starting the agent', async () => {
+    const h = await createHarness({ configuredWorkspace: true });
+
+    await expect(h.run('/doctor', { withRunExecutor: false })).resolves.toBe(true);
+
+    const report = lastMarkdownOrText(h.channel);
+    expect(report).toContain('workspace check: ok');
+    expect(report).toContain('run executor unavailable');
+    expect(h.agent.runOptions).toHaveLength(0);
+  });
+
+  it('does not persist secret-bearing doctor startup errors', async () => {
+    const h = await createHarness({ configuredWorkspace: true });
+    const secret = 'TOP-SECRET-ZCODE-DOCTOR-PROVIDER-ERROR';
     Object.assign(h.agent, {
       prepareRun: vi.fn(async () => {
         throw new Error(secret);
@@ -270,7 +219,7 @@ describe('/status and /doctor diagnostics', () => {
       await expect(h.run('/doctor')).resolves.toBe(true);
       await flushLogger();
       const logs = await readFile(join(logsDir, 'bridge-20260727.jsonl'), 'utf8');
-      expect(logs).toContain('kimi-doctor-submit-failed');
+      expect(logs).toContain('doctor.submit');
       expect(logs).not.toContain(secret);
       expect(lastMarkdownOrText(h.channel)).toContain('failed');
     } finally {
@@ -288,7 +237,6 @@ async function createHarness(options: {
   configuredWorkspace: boolean;
   bindWorkspace?: boolean;
   defaultWorkspace?: boolean;
-  agentKind?: AgentKind;
   accessMode?: AccessMode;
 }): Promise<Harness> {
   const tmp = await createTmpProfile('doctor-status-');
@@ -300,10 +248,8 @@ async function createHarness(options: {
   const agent = new FakeAgentAdapter({
     events: [[{ type: 'text', delta: 'OK' }, { type: 'done', terminationReason: 'normal' }]],
   });
-  const agentKind = options.agentKind ?? 'claude';
   const profileConfig = appConfig(
     options.configuredWorkspace ? tmp.workspace : undefined,
-    agentKind,
     options.accessMode,
   );
   if (profileConfig.workspaces.default) {
@@ -313,7 +259,7 @@ async function createHarness(options: {
     profileConfig.workspaces.default = tmp.workspace;
   }
   const controls = {
-    profile: agentKind,
+    profile: 'zcode',
     profileConfig,
     botOwnerId: 'ou-owner',
     ownerRefreshState: 'ok',
@@ -369,18 +315,14 @@ async function createHarness(options: {
 
 function appConfig(
   defaultWorkspace: string | undefined,
-  agentKind: AgentKind,
   accessMode?: AccessMode,
 ): ProfileConfig {
   const config = createDefaultProfileConfig({
-    agentKind,
+    agentKind: 'zcode',
     accounts: { app: { id: 'app-id', secret: 'secret', tenant: 'feishu' } },
     access: { admins: ['ou-admin'] },
-    ...(agentKind === 'claude'
-      ? { sandbox: { defaultMode: 'read-only' as const, maxMode: 'workspace-write' as const } }
-      : {}),
-    ...(agentKind === 'codex' ? { codex: { binaryPath: 'codex' } } : {}),
-    ...(agentKind === 'kimi' ? { kimi: { binaryPath: 'kimi' } } : {}),
+    sandbox: { defaultMode: 'read-only' as const, maxMode: 'workspace-write' as const },
+    zcode: { runtimePath: '/usr/local/bin/zcode' },
     ...(accessMode
       ? { permissions: { defaultAccess: accessMode, maxAccess: accessMode } }
       : {}),
@@ -420,16 +362,6 @@ function lastStreamCardJson(channel: FakeChannel): string {
   expect(stream).toBeDefined();
   const initial = (stream?.input as { card?: { initial?: unknown } } | undefined)?.card?.initial;
   return JSON.stringify(stream?.cardUpdates.at(-1) ?? initial);
-}
-
-function expectKimiSafetyNotice(value: string): void {
-  expect(value).toContain('macOS Seatbelt + ACP 受控文本读取');
-  expect(value).toContain('default 模式与拒绝审批');
-  expect(value).toContain('写入');
-  expect(value).toContain('进程执行');
-  expect(value).toContain('附件');
-  expect(value).toContain('MCP');
-  expect(value).toContain('Skill');
 }
 
 function jsonStringContent(value: string): string {

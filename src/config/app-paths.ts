@@ -31,10 +31,14 @@ export interface AppPaths {
   appLockFile(appId: string): string;
 }
 
-const DEFAULT_PROFILE = 'claude';
+const DEFAULT_PROFILE = 'zcode';
 
 export function resolveAppPaths(opts: ResolveAppPathsOptions = {}): AppPaths {
-  const rootDir = opts.rootDir ?? process.env.LARK_CHANNEL_HOME ?? join(homedir(), '.lark-channel');
+  // Deliberately NOT falling back to LARK_CHANNEL_HOME: this bridge must never
+  // share a config root with lark-channel-bridge (live bridges clobber each
+  // other's config fields when they share one root).
+  const rootDir =
+    opts.rootDir ?? process.env.LARK_ZCODE_BRIDGE_HOME ?? join(homedir(), '.lark-zcode-bridge');
   const profile = normalizeProfileName(opts.profile ?? DEFAULT_PROFILE);
   const profileDir = join(rootDir, 'profiles', profile);
   const registryDir = join(rootDir, 'registry');

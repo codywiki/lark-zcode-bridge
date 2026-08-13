@@ -10,32 +10,33 @@ import { createDefaultProfileConfig } from '../../../src/config/profile-schema.j
 import { createRuntimeProfileConfig } from '../../../src/runtime/profile-runtime.js';
 
 describe('start runtime agent factory', () => {
-  it('keeps Claude as the default runtime agent', () => {
+  it('keeps ZCode as the default runtime agent', () => {
     const agent = createRuntimeAgent(
       createDefaultProfileConfig({
-        agentKind: 'claude',
+        agentKind: 'zcode',
         accounts: appAccount(),
+        zcode: zcodeConfig(),
       }),
       { profileDir: tmpdir() },
     );
 
-    expect(agent.id).toBe('claude');
-    expect(agent.displayName).toBe('Claude Code');
+    expect(agent.id).toBe('zcode');
+    expect(agent.displayName).toBe('ZCode CLI');
   });
 
-  it('creates CodexAdapter from canonical workspace permissions', () => {
+  it('creates ZcodeAdapter from canonical workspace permissions', () => {
     const profile = createDefaultProfileConfig({
-      agentKind: 'codex',
+      agentKind: 'zcode',
       accounts: appAccount(),
-      codex: codexConfig(),
+      zcode: zcodeConfig(),
       permissions: { defaultAccess: 'workspace', maxAccess: 'workspace' },
     });
     const agent = createRuntimeAgent(profile, {
-      profileDir: '/tmp/lark-channel-bridge/profiles/codex-e2e',
+      profileDir: '/tmp/lark-zcode-bridge/profiles/zcode-e2e',
     });
 
-    expect(agent.id).toBe('codex');
-    expect(agent.displayName).toBe('Codex CLI');
+    expect(agent.id).toBe('zcode');
+    expect(agent.displayName).toBe('ZCode CLI');
     expect(profile.permissions).toEqual({
       defaultAccess: 'workspace',
       maxAccess: 'workspace',
@@ -46,62 +47,48 @@ describe('start runtime agent factory', () => {
     });
   });
 
-  it('creates a Codex runtime agent when an older profile has only a binary path', () => {
+  it('creates a ZCode runtime agent when a profile has only a runtime path', () => {
     const agent = createRuntimeAgent(
       createDefaultProfileConfig({
-        agentKind: 'codex',
+        agentKind: 'zcode',
         accounts: appAccount(),
-        codex: { binaryPath: '/usr/local/bin/codex' },
+        zcode: { runtimePath: '/opt/zcode/zcode.cjs' },
       }),
-      { profileDir: '/tmp/lark-channel-bridge/profiles/codex-e2e' },
+      { profileDir: '/tmp/lark-zcode-bridge/profiles/zcode-e2e' },
     );
 
-    expect(agent.id).toBe('codex');
-    expect(agent.displayName).toBe('Codex CLI');
+    expect(agent.id).toBe('zcode');
+    expect(agent.displayName).toBe('ZCode CLI');
   });
 
-  it('seeds a default Codex binary when bootstrapping a new Codex profile', () => {
+  it('seeds a default ZCode runtime path when bootstrapping a new ZCode profile', () => {
     const profile = createRuntimeProfileConfig({
-      agentKind: 'codex',
+      agentKind: 'zcode',
       accounts: appAccount(),
     });
 
-    expect(profile.codex?.binaryPath).toBe('codex');
+    expect(profile.zcode?.runtimePath).toBeTruthy();
   });
 
-  it('creates KimiAdapter from a Kimi profile', () => {
-    const agent = createRuntimeAgent(
-      createDefaultProfileConfig({
-        agentKind: 'kimi',
-        accounts: appAccount(),
-        kimi: { binaryPath: '/usr/local/bin/kimi' },
-      }),
-      { profileDir: '/tmp/lark-channel-bridge/profiles/kimi-pilot' },
-    );
-
-    expect(agent.id).toBe('kimi');
-    expect(agent.displayName).toBe('Kimi Code CLI');
-  });
-
-  it('seeds the configured Kimi command with read-only defaults', () => {
-    const previous = process.env.LARK_CHANNEL_KIMI_BIN;
-    process.env.LARK_CHANNEL_KIMI_BIN = '/opt/kimi/bin/kimi';
+  it('seeds the configured ZCode runtime path with full-access defaults', () => {
+    const previous = process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH;
+    process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH = '/opt/zcode/bin/zcode.cjs';
     try {
       const profile = createRuntimeProfileConfig({
-        agentKind: 'kimi',
+        agentKind: 'zcode',
         accounts: appAccount(),
       });
 
-      expect(profile.kimi?.binaryPath).toBe('/opt/kimi/bin/kimi');
+      expect(profile.zcode?.runtimePath).toBe('/opt/zcode/bin/zcode.cjs');
       expect(profile.permissions).toEqual({
-        defaultAccess: 'read-only',
-        maxAccess: 'read-only',
+        defaultAccess: 'full',
+        maxAccess: 'full',
       });
     } finally {
       if (previous === undefined) {
-        delete process.env.LARK_CHANNEL_KIMI_BIN;
+        delete process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH;
       } else {
-        process.env.LARK_CHANNEL_KIMI_BIN = previous;
+        process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH = previous;
       }
     }
   });
@@ -130,9 +117,9 @@ describe('start runtime agent factory', () => {
     expect(releaseIndex).toBeLessThan(exitIndex);
   });
 
-  it('rejects reconnect when a profile changes agent kind in place', () => {
-    expect(() => assertReconnectAgentKindUnchanged('claude', 'codex')).toThrow(/agent kind/i);
-    expect(() => assertReconnectAgentKindUnchanged('codex', 'codex')).not.toThrow();
+  it('accepts reconnect when the profile keeps the same agent kind', () => {
+    expect(() => assertReconnectAgentKindUnchanged('zcode', 'zcode')).not.toThrow();
+    expect(() => assertReconnectAgentKindUnchanged(undefined, undefined)).not.toThrow();
   });
 });
 
@@ -146,13 +133,10 @@ function appAccount() {
   };
 }
 
-function codexConfig() {
+function zcodeConfig() {
   return {
-    binaryPath: '/usr/local/bin/codex',
-    realpath: '/usr/local/bin/codex',
-    version: 'codex 1.2.3',
-    sha256: '0'.repeat(64),
-    owner: 501,
-    mode: 0o755,
+    runtimePath: '/opt/zcode/zcode.cjs',
+    realpath: '/opt/zcode/zcode.cjs',
+    version: '0.16.3',
   };
 }

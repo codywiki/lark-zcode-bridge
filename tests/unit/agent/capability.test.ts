@@ -2,32 +2,34 @@ import { describe, expect, it } from 'vitest';
 import { BRIDGE_SYSTEM_PROMPT } from '../../../src/agent/bridge-system-prompt';
 import {
   capabilityForProfile,
-  claudeCapability,
-  codexCapability,
-  kimiCapability,
+  zcodeCapability,
 } from '../../../src/agent/capability';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
 
 describe('agent capability contract', () => {
-  it('defines Claude capability with legacy callback marker compatibility', () => {
-    const capability = claudeCapability();
+  it('defines ZCode capability with stdin prompt injection and native history', () => {
+    const capability = zcodeCapability();
 
     expect(capability).toMatchObject({
-      agentId: 'claude',
-      sessionKind: 'claude-session',
-      promptInjection: 'append-system-prompt',
+      agentId: 'zcode',
+      sessionKind: 'zcode-session',
+      promptInjection: 'stdin-prefix',
       supportsNativeHistory: true,
       systemPrompt: BRIDGE_SYSTEM_PROMPT,
       callback: {
         marker: '__bridge_cb',
-        legacyMarkers: ['__claude_cb'],
+        legacyMarkers: [],
       },
     });
   });
 
-  it('defines Codex capability with thread sessions and stdin prompt injection', () => {
+  it('defaults to full access when no profile is provided', () => {
+    expect(zcodeCapability().permissions.maxAccess).toBe('full');
+  });
+
+  it('uses the ZCode profile max access as the static capability ceiling', () => {
     const profile = createDefaultProfileConfig({
-      agentKind: 'codex',
+      agentKind: 'zcode',
       accounts: {
         app: {
           id: 'cli_test',
@@ -35,65 +37,19 @@ describe('agent capability contract', () => {
           tenant: 'feishu',
         },
       },
-      codex: {
-        binaryPath: '/usr/local/bin/codex',
-      },
-      permissions: {
-        defaultAccess: 'workspace',
-        maxAccess: 'workspace',
-      },
-    });
-
-    expect(codexCapability(profile)).toMatchObject({
-      agentId: 'codex',
-      sessionKind: 'codex-thread',
-      promptInjection: 'stdin-prefix',
-      supportsNativeHistory: false,
-      systemPrompt: BRIDGE_SYSTEM_PROMPT,
-      permissions: {
-        maxAccess: 'workspace',
-      },
-    });
-  });
-
-  it('uses Codex profile max access as the static capability ceiling', () => {
-    const profile = createDefaultProfileConfig({
-      agentKind: 'codex',
-      accounts: {
-        app: {
-          id: 'cli_test',
-          secret: '${APP_SECRET}',
-          tenant: 'feishu',
-        },
-      },
-      codex: {
-        binaryPath: '/usr/local/bin/codex',
-      },
+      zcode: { runtimePath: '/opt/zcode/zcode.cjs' },
       permissions: {
         defaultAccess: 'read-only',
         maxAccess: 'read-only',
       },
     });
 
-    expect(codexCapability(profile).permissions.maxAccess).toBe('read-only');
+    expect(zcodeCapability(profile).permissions.maxAccess).toBe('read-only');
   });
 
-  it('defines Kimi sessions with a read-only compatibility ceiling when no profile is provided', () => {
-    expect(kimiCapability()).toMatchObject({
-      agentId: 'kimi',
-      sessionKind: 'kimi-session',
-      promptInjection: 'stdin-prefix',
-      supportsNativeHistory: false,
-      systemPrompt: BRIDGE_SYSTEM_PROMPT,
-      permissions: {
-        maxAccess: 'read-only',
-      },
-    });
-  });
-
-  it('uses Kimi profile max access as the static capability ceiling', () => {
+  it('selects capability from the profile', () => {
     const profile = createDefaultProfileConfig({
-      agentKind: 'kimi',
+      agentKind: 'zcode',
       accounts: {
         app: {
           id: 'cli_test',
@@ -101,28 +57,11 @@ describe('agent capability contract', () => {
           tenant: 'feishu',
         },
       },
-      kimi: { binaryPath: 'kimi' },
-      permissions: { defaultAccess: 'full', maxAccess: 'full' },
+      zcode: { runtimePath: '/opt/zcode/zcode.cjs' },
+      permissions: { defaultAccess: 'workspace', maxAccess: 'workspace' },
     });
 
-    expect(kimiCapability(profile).permissions.maxAccess).toBe('full');
-  });
-
-  it('selects capability from the profile kind', () => {
-    const profile = createDefaultProfileConfig({
-      agentKind: 'kimi',
-      accounts: {
-        app: {
-          id: 'cli_test',
-          secret: '${APP_SECRET}',
-          tenant: 'feishu',
-        },
-      },
-      kimi: { binaryPath: 'kimi' },
-      permissions: { defaultAccess: 'full', maxAccess: 'full' },
-    });
-
-    expect(capabilityForProfile(profile).permissions.maxAccess).toBe('full');
-    expect(capabilityForProfile(profile).agentId).toBe('kimi');
+    expect(capabilityForProfile(profile).permissions.maxAccess).toBe('workspace');
+    expect(capabilityForProfile(profile).agentId).toBe('zcode');
   });
 });

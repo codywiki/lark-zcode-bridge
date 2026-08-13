@@ -116,23 +116,6 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
     log.info('comment', 'skip', { reason: 'unsupported-target', commentScopeId: eventCommentScopeId });
     return;
   }
-  // The organization-wide Kimi pilot is intentionally limited to explicitly
-  // allowlisted IM/topic chats. Document comments can include collaborators
-  // outside those chats and currently bypass the normal chat/user allowlists,
-  // so keep this surface closed until tenant membership checks are available.
-  if (controls.profileConfig.agentKind === 'kimi') {
-    log.info('comment', 'skip', { reason: 'kimi-comment-surface-disabled' });
-    await postCommentReply(
-      channel,
-      target,
-      evt,
-      'Kimi 试点暂只支持已授权群聊中的 @消息，暂不处理云文档评论。',
-      { isWhole: false },
-    ).catch((err) => {
-      log.fail('comment', err, { step: 'postKimiSurfaceDisabledReply' });
-    });
-    return;
-  }
   const targetDocScopeId = commentDocumentScopeId(target.fileToken);
   const commentThreadScopeId = eventCommentScopeId;
   const runScopeId = commentExecutionScopeId(commentThreadScopeId);
@@ -220,8 +203,6 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
       capability,
       profileConfig: controls.profileConfig,
       now: Date.now(),
-      codexHome: controls.profileConfig.codex?.codexHome,
-      inheritCodexHome: controls.profileConfig.codex?.inheritCodexHome,
       ...(typeof commentTimeoutMs === 'number' ? { ttlMs: commentTimeoutMs } : {}),
     });
     if (!policy.ok) {
@@ -251,18 +232,15 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
             policyFingerprint: policy.policyFingerprint,
           })
         : undefined;
-      const sessionId =
-        canResumeAgentSession &&
-        (capability.agentId === 'claude' || capability.agentId === 'kimi')
-          ? catalogEntry?.sessionId ??
-            sessions.resumeFor(docSessionScopeId, cwdRealpath) ??
-            sessions.resumeFor(legacyDocSessionScopeId, cwdRealpath)
-          : undefined;
-      const threadId = capability.agentId === 'codex' ? catalogEntry?.threadId : undefined;
+      const sessionId = canResumeAgentSession
+        ? catalogEntry?.sessionId ??
+          sessions.resumeFor(docSessionScopeId, cwdRealpath) ??
+          sessions.resumeFor(legacyDocSessionScopeId, cwdRealpath)
+        : undefined;
       log.info('comment', 'session', {
         commentScopeId: runScopeId,
         sessionScopeId: agentSessionScopeId,
-        resume: Boolean(sessionId ?? threadId),
+        resume: Boolean(sessionId),
         sessionScopeActive: agentSessionRun.wasActive,
         cwd: cwdRealpath,
       });
@@ -271,15 +249,7 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
         scopeId: runScopeId,
         policy,
         sessionId,
-        threadId,
         model: sessions.getModel(docSessionScopeId) ?? sessions.getModel(legacyDocSessionScopeId),
-        reasoningEffort:
-          capability.agentId === 'codex'
-            ? (
-                sessions.getReasoningEffort(docSessionScopeId) ??
-                sessions.getReasoningEffort(legacyDocSessionScopeId)
-              )
-            : undefined,
         stopGraceMs: getAgentStopGraceMs(controls.cfg),
         observability: {
           profile: controls.profile,
@@ -347,11 +317,7 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
             policy,
             event: e,
           });
-          if (
-            (capability.agentId === 'claude' || capability.agentId === 'kimi') &&
-            e.type === 'system' &&
-            e.sessionId
-          ) {
+          if (e.type === 'system' && e.sessionId) {
             sessions.set(docSessionScopeId, e.sessionId, policy.cwdRealpath);
           }
           switch (e.type) {

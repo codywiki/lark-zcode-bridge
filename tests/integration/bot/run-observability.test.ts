@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { claudeCapability } from '../../../src/agent/capability';
+import { zcodeCapability } from '../../../src/agent/capability';
 import { ActiveRuns } from '../../../src/bot/active-runs';
 import { ProcessPool } from '../../../src/bot/process-pool';
 import { startRunFlow } from '../../../src/bot/run-flow';
@@ -33,15 +33,15 @@ describe('bot run observability', () => {
       prompt: 'hello',
       attachments: [],
       access: { ok: true, reason: 'allowed-user' },
-      capability: claudeCapability(h.profileConfig),
+      capability: zcodeCapability(h.profileConfig),
       profileConfig: h.profileConfig,
       sessions: h.sessions,
       workspaces: h.workspaces,
       executor: h.executor,
       now: 1_700_000_000_000,
       observability: {
-        profile: 'claude',
-        agent: 'claude',
+        profile: 'zcode',
+        agent: 'zcode',
         source: 'im',
         stage: 'submit',
       },
@@ -56,8 +56,8 @@ describe('bot run observability', () => {
       (line) => line.phase === 'run' && line.event === 'started',
     );
     expect(started).toMatchObject({
-      profile: 'claude',
-      agent: 'claude',
+      profile: 'zcode',
+      agent: 'zcode',
       source: 'im',
       stage: 'submit',
     });
@@ -92,7 +92,7 @@ async function createHarness(): Promise<{
     postDoneExitGraceMs: 1,
   });
   const base = createDefaultProfileConfig({
-    agentKind: 'claude',
+    agentKind: 'zcode',
     accounts: {
       app: {
         id: 'cli_test',
@@ -100,6 +100,7 @@ async function createHarness(): Promise<{
         tenant: 'feishu',
       },
     },
+    zcode: { runtimePath: join(tmp.root, 'zcode.cjs') },
   });
   const profileConfig = {
     ...base,

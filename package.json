@@ -1,19 +1,19 @@
 {
-  "name": "lark-channel-bridge",
-  "version": "0.3.1",
-  "description": "Bridge Feishu/Lark messenger with local CLI coding agents",
+  "name": "lark-zcode-bridge",
+  "version": "0.1.0",
+  "description": "Bridge Feishu/Lark messenger with the ZCode CLI (GLM Coding Plan) — a zcode-only fork of lark-channel-bridge",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zarazhangrui/feishu-claude-code-bridge.git"
+    "url": "git+https://github.com/codywiki/lark-zcode-bridge.git"
   },
   "bugs": {
-    "url": "https://github.com/zarazhangrui/feishu-claude-code-bridge/issues"
+    "url": "https://github.com/codywiki/lark-zcode-bridge/issues"
   },
-  "homepage": "https://github.com/zarazhangrui/feishu-claude-code-bridge#readme",
+  "homepage": "https://github.com/codywiki/lark-zcode-bridge#readme",
   "bin": {
-    "lark-channel-bridge": "./bin/lark-channel-bridge.mjs"
+    "lark-zcode-bridge": "./bin/lark-zcode-bridge.mjs"
   },
   "exports": {
     ".": {
@@ -73,11 +73,10 @@
   "keywords": [
     "feishu",
     "lark",
-    "claude",
-    "claude-code",
-    "codex",
-    "kimi",
-    "kimi-code",
+    "zcode",
+    "glm",
+    "bigmodel",
+    "coding-plan",
     "cli",
     "channel",
     "bridge"

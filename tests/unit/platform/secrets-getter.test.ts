@@ -24,7 +24,7 @@ describe('secrets getter wrapper platform output', () => {
     expect(result).toBe(script);
     const content = await readFile(script, 'utf8');
     expect(content).toContain('#!/bin/sh');
-    expect(content).toContain(`LARK_CHANNEL_HOME='${root}'`);
+    expect(content).toContain(`LARK_ZCODE_BRIDGE_HOME='${root}'`);
     expect(content).toContain("'/opt/node/bin/node'");
     if (process.platform !== 'win32') {
       expect((await stat(script)).mode & 0o111).not.toBe(0);
@@ -47,7 +47,7 @@ describe('secrets getter wrapper platform output', () => {
     expect(result).toBe(`${script}.cmd`);
     const content = await readFile(result, 'utf8');
     expect(content).toContain('@echo off');
-    expect(content).toContain(`set "LARK_CHANNEL_HOME=${root}"`);
+    expect(content).toContain(`set "LARK_ZCODE_BRIDGE_HOME=${root}"`);
     expect(content).toContain('"C:\\Program Files\\nodejs\\node.exe"');
     expect(content).toContain('"C:\\bridge\\bin\\bridge.mjs" secrets get %*');
   });

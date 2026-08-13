@@ -144,11 +144,12 @@ async function createHarness(
   const pending = new PendingQueue(60_000, () => {});
   const store = new CallbackNonceStore(`${tmp.profile}/callback-nonces.json`);
   const controls = {
-    profile: 'claude',
+    profile: 'zcode',
     profileConfig: createDefaultProfileConfig({
-      agentKind: 'claude',
+      agentKind: 'zcode',
       accounts: { app: { id: 'app-id', secret: 'secret', tenant: 'feishu' } },
       access: { allowedChats: ['oc_group'] },
+      zcode: { runtimePath: `${tmp.root}/zcode.cjs` },
     }),
     botOwnerId: 'ou_owner',
     ownerRefreshState: 'ok',
@@ -157,9 +158,10 @@ async function createHarness(
     async exit() {},
     configPath: `${tmp.profile}/config.json`,
     cfg: createDefaultProfileConfig({
-      agentKind: 'claude',
+      agentKind: 'zcode',
       accounts: { app: { id: 'app-id', secret: 'secret', tenant: 'feishu' } },
       access: { allowedChats: ['oc_group'] },
+      zcode: { runtimePath: `${tmp.root}/zcode.cjs` },
     }),
     processId: 'proc-1',
   } satisfies Controls;

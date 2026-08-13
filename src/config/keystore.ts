@@ -9,8 +9,8 @@ import { writeFileAtomic } from '../platform/atomic-write';
  * Local AES-256-GCM keystore for App Secrets and similar.
  *
  * Layout on disk:
- *   ~/.lark-channel/secrets.enc      — JSON map { id → encrypted envelope }
- *   ~/.lark-channel/.keystore.salt   — 32 random bytes, generated once
+ *   ~/.lark-zcode-bridge/secrets.enc      — JSON map { id → encrypted envelope }
+ *   ~/.lark-zcode-bridge/.keystore.salt   — 32 random bytes, generated once
  *
  * Both files are chmod 0600. The encryption key is derived (PBKDF2-SHA256,
  * 100k iters) from `hostname + userInfo().username + salt`. This is

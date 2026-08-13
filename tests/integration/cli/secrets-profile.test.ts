@@ -11,7 +11,6 @@ import {
 } from '../../../src/config/keystore';
 import {
   createDefaultProfileConfig,
-  type AgentKind,
   type RootConfig,
 } from '../../../src/config/profile-schema';
 import { secretKeyForApp } from '../../../src/config/schema';
@@ -38,9 +37,9 @@ afterEach(async () => {
 describe('profile-aware secrets commands', () => {
   it('resolves secrets active-first, then by profile name, and warns on duplicates', async () => {
     const root = await makeRoot();
-    await writeProfiles(root, 'codex-dev', ['alpha', 'codex-dev', 'zeta']);
+    await writeProfiles(root, 'zcode-dev', ['alpha', 'zcode-dev', 'zeta']);
     const duplicate = secretKeyForApp('cli_duplicate');
-    await setSecret(duplicate, 'from-active', resolveAppPaths({ rootDir: root, profile: 'codex-dev' }));
+    await setSecret(duplicate, 'from-active', resolveAppPaths({ rootDir: root, profile: 'zcode-dev' }));
     await setSecret(duplicate, 'from-alpha', resolveAppPaths({ rootDir: root, profile: 'alpha' }));
     const fallback = secretKeyForApp('cli_fallback');
     await setSecret(fallback, 'from-zeta', resolveAppPaths({ rootDir: root, profile: 'zeta' }));
@@ -55,14 +54,14 @@ describe('profile-aware secrets commands', () => {
     ).resolves.toBe('from-alpha');
 
     expect(warnings).toEqual([
-      expect.stringContaining('secret app-cli_duplicate exists in multiple profiles; using codex-dev'),
+      expect.stringContaining('secret app-cli_duplicate exists in multiple profiles; using zcode-dev'),
       expect.stringContaining('secret app-cli_fallback exists in multiple profiles; using alpha'),
     ]);
   });
 
   it('sets and removes secrets in an explicit profile or the active profile', async () => {
     const root = await makeRoot();
-    await writeProfiles(root, 'codex-dev', ['alpha', 'codex-dev']);
+    await writeProfiles(root, 'zcode-dev', ['alpha', 'zcode-dev']);
 
     await setAppSecret('cli_alpha', 'alpha-secret', { rootDir: root, profile: 'alpha' });
     await setAppSecret('cli_active', 'active-secret', { rootDir: root });
@@ -71,7 +70,7 @@ describe('profile-aware secrets commands', () => {
       getSecret(secretKeyForApp('cli_alpha'), resolveAppPaths({ rootDir: root, profile: 'alpha' })),
     ).resolves.toBe('alpha-secret');
     await expect(
-      getSecret(secretKeyForApp('cli_active'), resolveAppPaths({ rootDir: root, profile: 'codex-dev' })),
+      getSecret(secretKeyForApp('cli_active'), resolveAppPaths({ rootDir: root, profile: 'zcode-dev' })),
     ).resolves.toBe('active-secret');
 
     await expect(removeAppSecret('cli_alpha', { rootDir: root, profile: 'alpha' })).resolves.toBe(true);
@@ -82,9 +81,9 @@ describe('profile-aware secrets commands', () => {
 
   it('uses LARK_CHANNEL_PROFILE to resolve duplicate secret ids within one profile', async () => {
     const root = await makeRoot();
-    await writeProfiles(root, 'codex-dev', ['alpha', 'codex-dev']);
+    await writeProfiles(root, 'zcode-dev', ['alpha', 'zcode-dev']);
     const duplicate = secretKeyForApp('cli_duplicate');
-    await setSecret(duplicate, 'from-codex', resolveAppPaths({ rootDir: root, profile: 'codex-dev' }));
+    await setSecret(duplicate, 'from-zcode-dev', resolveAppPaths({ rootDir: root, profile: 'zcode-dev' }));
     await setSecret(duplicate, 'from-alpha', resolveAppPaths({ rootDir: root, profile: 'alpha' }));
     const warnings: string[] = [];
 
@@ -97,8 +96,8 @@ describe('profile-aware secrets commands', () => {
 
   it('caches the derived keystore key within one secrets process', async () => {
     const root = await makeRoot();
-    await writeProfiles(root, 'claude', ['claude']);
-    const appPaths = resolveAppPaths({ rootDir: root, profile: 'claude' });
+    await writeProfiles(root, 'zcode', ['zcode']);
+    const appPaths = resolveAppPaths({ rootDir: root, profile: 'zcode' });
     await setSecret(secretKeyForApp('cli_one'), 'one', appPaths);
     await setSecret(secretKeyForApp('cli_two'), 'two', appPaths);
     clearKeystoreDerivedKeyCache();
@@ -113,9 +112,8 @@ describe('profile-aware secrets commands', () => {
 async function writeProfiles(root: string, activeProfile: string, names: string[]): Promise<void> {
   const profiles: RootConfig['profiles'] = {};
   for (const name of names) {
-    const agentKind: AgentKind = name.startsWith('codex') ? 'codex' : 'claude';
     profiles[name] = createDefaultProfileConfig({
-      agentKind,
+      agentKind: 'zcode',
       accounts: {
         app: {
           id: `cli_${name.replace(/[^A-Za-z0-9]/g, '_')}`,
@@ -123,7 +121,7 @@ async function writeProfiles(root: string, activeProfile: string, names: string[
           tenant: 'feishu',
         },
       },
-      ...(agentKind === 'codex' ? { codex: { binaryPath: 'codex' } } : {}),
+      zcode: { runtimePath: join(root, 'zcode.cjs') },
     });
     await mkdir(join(root, 'profiles', name), { recursive: true });
   }

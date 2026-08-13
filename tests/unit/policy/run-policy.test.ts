@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { claudeCapability, codexCapability } from '../../../src/agent/capability';
+import { zcodeCapability } from '../../../src/agent/capability';
 import type { AccessMode } from '../../../src/config/permissions';
 import { createDefaultProfileConfig, type ProfileConfig } from '../../../src/config/profile-schema';
 import {
@@ -66,13 +66,11 @@ describe('run policy', () => {
     const result = evaluateRunPolicy({
       ...baseInput({
         profileConfig: profile({
-          agentKind: 'codex',
           permissions: { defaultAccess: 'workspace', maxAccess: 'workspace' },
         }),
       }),
-      capability: codexCapability(
+      capability: zcodeCapability(
         profile({
-          agentKind: 'codex',
           permissions: { defaultAccess: 'read-only', maxAccess: 'read-only' },
         }),
       ),
@@ -167,7 +165,7 @@ function baseInput(overrides: Partial<RunPolicyInput> = {}): RunPolicyInput {
     requestedCwd: '/repo/project',
     cwdRealpath: '/repo/project',
     access: { ok: true, reason: 'allowed-user' },
-    capability: claudeCapability(profileConfig),
+    capability: zcodeCapability(profileConfig),
     profileConfig,
     now: 1000,
     ...overrides,
@@ -175,7 +173,6 @@ function baseInput(overrides: Partial<RunPolicyInput> = {}): RunPolicyInput {
 }
 
 function profile(options: {
-  agentKind?: 'claude' | 'codex';
   permissions?: {
     defaultAccess: AccessMode;
     maxAccess: AccessMode;
@@ -183,7 +180,7 @@ function profile(options: {
   attachments?: Partial<ProfileConfig['attachments']>;
 } = {}) {
   const cfg = createDefaultProfileConfig({
-    agentKind: options.agentKind ?? 'claude',
+    agentKind: 'zcode',
     accounts: {
       app: {
         id: 'cli_test',
@@ -191,9 +188,7 @@ function profile(options: {
         tenant: 'feishu',
       },
     },
-    ...(options.agentKind === 'codex'
-      ? { codex: { binaryPath: '/usr/local/bin/codex' } }
-      : {}),
+    zcode: { runtimePath: '/opt/zcode/zcode.cjs' },
     permissions: options.permissions,
   });
   return {

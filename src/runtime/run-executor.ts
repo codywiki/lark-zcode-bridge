@@ -25,7 +25,6 @@ export interface SubmitRunInput {
   threadId?: string;
   model?: string;
   reasoningEffort?: string;
-  codexConfigOverrides?: readonly string[];
   images?: readonly string[];
   stopGraceMs?: number;
   nowait?: boolean;
@@ -125,7 +124,6 @@ export class RunExecutor {
       threadId: input.threadId,
       model: input.model,
       reasoningEffort: input.reasoningEffort,
-      codexConfigOverrides: input.codexConfigOverrides,
       images: input.images,
       sandbox: input.policy.sandbox,
       permissionMode: input.policy.permissionMode,

@@ -1,10 +1,15 @@
-# 项目约定 — lark-channel-bridge-src
+# 项目约定 — lark-zcode-bridge
 
-> 通用版约定，适用于 Codex CLI、Kimi Code 等任何读取根目录 AGENTS.md 的 agent。
+> 通用版约定，适用于 Codex CLI、Kimi Code、Claude Code 等任何读取根目录 AGENTS.md 的 agent。
 > 本文件（AGENTS.md）为所有 agent 的通用约定真值；Claude Code 的 `.claude/CLAUDE.md` 由本文件派生。
 
 ## 项目定位
-飞书/Lark 与本地 Claude Code、Codex CLI、Kimi Code CLI 的 bridge。转发消息、流式卡片、会话连续性、队列/批处理、多 workspace、图片/文件、交互卡片。
+飞书/Lark 与本地 **ZCode CLI** 的 bridge（zcode-only fork，上游 lark-channel-bridge）。转发消息、流式卡片、会话连续性、队列/批处理、多 workspace、图片/文件、交互卡片。
+
+- 唯一 agent：`src/agent/zcode/`（ZcodeAdapter，headless `--prompt --json --mode plan|build|yolo`）
+- 默认完整权限（yolo，全目录读写）；bridge 级访问控制 allowedUsers/allowedChats 不变
+- 独立配置根 `~/.lark-zcode-bridge/`（env `LARK_ZCODE_BRIDGE_HOME`），**绝不**与 lark-channel-bridge 的 `~/.lark-channel/` 共享
+- 每个 profile 独立 zcode-home，绝不读写用户真实 `~/.zcode`
 
 ## 技术栈
 - TypeScript

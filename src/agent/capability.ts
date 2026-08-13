@@ -2,8 +2,8 @@ import type { AccessMode } from '../config/permissions';
 import type { ProfileConfig } from '../config/profile-schema';
 import { BRIDGE_SYSTEM_PROMPT } from './bridge-system-prompt';
 
-export type AgentCapabilityId = 'claude' | 'codex' | 'kimi';
-export type AgentSessionKind = 'claude-session' | 'codex-thread' | 'kimi-session';
+export type AgentCapabilityId = 'zcode';
+export type AgentSessionKind = 'zcode-session';
 export type PromptInjectionMode = 'append-system-prompt' | 'stdin-prefix';
 
 export interface AgentCapability {
@@ -21,50 +21,18 @@ export interface AgentCapability {
   };
 }
 
-export function claudeCapability(profile?: Pick<ProfileConfig, 'permissions'>): AgentCapability {
+export function zcodeCapability(profile?: Pick<ProfileConfig, 'permissions'>): AgentCapability {
+  // Default full access (yolo), matching the upstream bridge's claude default.
+  // Profiles can lower defaultAccess/maxAccess to 'workspace' (build) or
+  // 'read-only' (plan) via the permissions config.
   const maxAccess = profile?.permissions.maxAccess ?? 'full';
   return {
-    agentId: 'claude',
-    sessionKind: 'claude-session',
-    promptInjection: 'append-system-prompt',
+    agentId: 'zcode',
+    sessionKind: 'zcode-session',
+    promptInjection: 'stdin-prefix',
     systemPrompt: BRIDGE_SYSTEM_PROMPT,
+    // `--resume sess_<id>` carries the full server-side conversation history.
     supportsNativeHistory: true,
-    callback: {
-      marker: '__bridge_cb',
-      legacyMarkers: ['__claude_cb'],
-    },
-    permissions: {
-      maxAccess,
-    },
-  };
-}
-
-export function codexCapability(profile: Pick<ProfileConfig, 'permissions'>): AgentCapability {
-  const maxAccess = profile.permissions.maxAccess;
-  return {
-    agentId: 'codex',
-    sessionKind: 'codex-thread',
-    promptInjection: 'stdin-prefix',
-    systemPrompt: BRIDGE_SYSTEM_PROMPT,
-    supportsNativeHistory: false,
-    callback: {
-      marker: '__bridge_cb',
-      legacyMarkers: [],
-    },
-    permissions: {
-      maxAccess,
-    },
-  };
-}
-
-export function kimiCapability(profile?: Pick<ProfileConfig, 'permissions'>): AgentCapability {
-  const maxAccess = profile?.permissions.maxAccess ?? 'read-only';
-  return {
-    agentId: 'kimi',
-    sessionKind: 'kimi-session',
-    promptInjection: 'stdin-prefix',
-    systemPrompt: BRIDGE_SYSTEM_PROMPT,
-    supportsNativeHistory: false,
     callback: {
       marker: '__bridge_cb',
       legacyMarkers: [],
@@ -76,12 +44,5 @@ export function kimiCapability(profile?: Pick<ProfileConfig, 'permissions'>): Ag
 }
 
 export function capabilityForProfile(profile: ProfileConfig): AgentCapability {
-  switch (profile.agentKind) {
-    case 'claude':
-      return claudeCapability(profile);
-    case 'codex':
-      return codexCapability(profile);
-    case 'kimi':
-      return kimiCapability(profile);
-  }
+  return zcodeCapability(profile);
 }

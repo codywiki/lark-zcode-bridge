@@ -2,9 +2,7 @@ import dns from 'node:dns';
 import os from 'node:os';
 import { createInterface } from 'node:readline';
 import pkg from '../../../package.json';
-import { ClaudeAdapter } from '../../agent/claude/adapter';
-import { CodexAdapter } from '../../agent/codex/adapter';
-import { KimiAdapter } from '../../agent/kimi/adapter';
+import { ZcodeAdapter } from '../../agent/zcode/adapter';
 import {
   AgentPreflightError,
   formatAgentPreflightDiagnostic,
@@ -136,7 +134,7 @@ export async function runStart(opts: StartOptions): Promise<void> {
       await withProfileAndAppLocks(
         appPaths,
         cfg.accounts.app.id,
-        cfg.agentKind ?? 'claude',
+        'zcode',
         async (locks) => {
           runtimeLocks = locks;
           const sessions = new SessionStore(appPaths.sessionsFile);
@@ -186,7 +184,7 @@ export async function runStart(opts: StartOptions): Promise<void> {
           appId: cfg.accounts.app.id,
           tenant: cfg.accounts.app.tenant,
           profileName: appPaths.profile,
-          agentKind: cfg.agentKind ?? 'claude',
+          agentKind: 'zcode',
           configPath,
           version: pkg.version,
           registryFile: appPaths.userRegistryFile,
@@ -268,7 +266,7 @@ export async function runStart(opts: StartOptions): Promise<void> {
                   nextAppLock = await acquireAppRuntimeLock(
                     nextRuntime.appPaths,
                     next.accounts.app.id,
-                    next.agentKind ?? 'claude',
+                    'zcode',
                   );
                 }
                 console.log(
@@ -388,17 +386,11 @@ async function checkRuntimeAgentAvailability(agent: AgentAdapter): Promise<Agent
   if (agent.checkAvailability) return agent.checkAvailability();
   const ok = await agent.isAvailable();
   if (ok) return { ok: true };
-  const fallback =
-    agent.id === 'codex'
-      ? { agentId: 'codex' as const, command: 'codex' }
-      : agent.id === 'kimi'
-        ? { agentId: 'kimi' as const, command: 'kimi' }
-        : { agentId: 'claude' as const, command: 'claude' };
   const diagnostic = {
     code: 'agent-binary-not-found' as const,
-    agentId: fallback.agentId,
+    agentId: 'zcode' as const,
     agentName: agent.displayName,
-    command: fallback.command,
+    command: 'zcode',
   };
   return {
     ok: false,
@@ -411,8 +403,8 @@ export function assertReconnectAgentKindUnchanged(
   current: AgentKind | undefined,
   next: AgentKind | undefined,
 ): void {
-  const currentKind = current ?? 'claude';
-  const nextKind = next ?? 'claude';
+  const currentKind = current ?? 'zcode';
+  const nextKind = next ?? 'zcode';
   if (nextKind !== currentKind) {
     throw new Error(
       `agent kind cannot change during reconnect (${currentKind} -> ${nextKind}); stop/start is required`,
@@ -440,35 +432,19 @@ export function createRuntimeAgent(
             : {}),
         }
       : undefined;
-  if (profileConfig.agentKind === 'codex') {
-    const codex = profileConfig.codex;
-    if (!codex?.binaryPath) {
-      throw new Error('codex profile requires codex.binaryPath');
-    }
-    return new CodexAdapter({
-      binary: codex.binaryPath,
-      profileStateDir: appPaths.profileDir,
-      ...(codex.codexHome ? { codexHome: codex.codexHome } : {}),
-      inheritCodexHome: codex.inheritCodexHome === true,
-      ignoreUserConfig: codex.ignoreUserConfig === true,
-      ignoreRules: codex.ignoreRules !== false,
-      sandbox: profileConfig.sandbox.defaultMode,
-      larkChannel,
-    });
+  const zcode = profileConfig.zcode;
+  if (!zcode?.runtimePath) {
+    throw new Error('zcode profile requires zcode.runtimePath');
   }
-  if (profileConfig.agentKind === 'kimi') {
-    const kimi = profileConfig.kimi;
-    if (!kimi?.binaryPath) {
-      throw new Error('kimi profile requires kimi.binaryPath');
-    }
-    return new KimiAdapter({
-      binary: kimi.binaryPath,
-      defaultModel: kimi.defaultModel,
-      profileStateDir: appPaths.profileDir,
-      larkChannel,
-    });
-  }
-  return new ClaudeAdapter({ larkChannel });
+  return new ZcodeAdapter({
+    runtimePath: zcode.runtimePath,
+    profileStateDir: appPaths.profileDir,
+    ...(zcode.nodePath ? { nodePath: zcode.nodePath } : {}),
+    ...(zcode.version ? { recordedVersion: zcode.version } : {}),
+    ...(zcode.defaultModel ? { defaultModel: zcode.defaultModel } : {}),
+    ...(zcode.baseURL ? { baseURL: zcode.baseURL } : {}),
+    larkChannel,
+  });
 }
 
 /**
@@ -565,7 +541,7 @@ async function confirmStopRuntimeLockProcess(err: RuntimeLockConflictError): Pro
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     throw new Error(
       `当前 ${err.kind === 'profile' ? 'profile' : 'app'} 已有 bridge 进程占用；` +
-        '非交互模式无法确认停止，请先用 `lark-channel-bridge ps` 查看并用 `lark-channel-bridge kill <bot id>` 停止后重试',
+        '非交互模式无法确认停止，请先用 `lark-zcode-bridge ps` 查看并用 `lark-zcode-bridge kill <bot id>` 停止后重试',
     );
   }
 

@@ -23,17 +23,14 @@ describe('platform spawn env', () => {
     ]);
   });
 
-  it('adapters use cross-spawn without shell invocation', async () => {
-    const [claudeSource, codexSource] = await Promise.all([
-      readFile(new URL('../../../src/agent/claude/adapter.ts', import.meta.url), 'utf8'),
-      readFile(new URL('../../../src/agent/codex/adapter.ts', import.meta.url), 'utf8'),
-    ]);
+  it('the zcode adapter uses cross-spawn without shell invocation', async () => {
+    const zcodeSource = await readFile(
+      new URL('../../../src/agent/zcode/adapter.ts', import.meta.url),
+      'utf8',
+    );
 
-    expect(claudeSource).toContain("from '../../platform/spawn'");
-    expect(codexSource).toContain("from '../../platform/spawn'");
-    expect(claudeSource).not.toContain("from 'node:child_process'");
-    expect(codexSource).not.toContain("from 'node:child_process'");
-    expect(claudeSource).not.toContain('shell: true');
-    expect(codexSource).not.toContain('shell: true');
+    expect(zcodeSource).toContain("from '../../platform/spawn'");
+    expect(zcodeSource).not.toContain("from 'node:child_process'");
+    expect(zcodeSource).not.toContain('shell: true');
   });
 });

@@ -191,7 +191,7 @@ async function createHarness(options: {
       activeRuns,
       executor,
       controls: {
-        profile: 'claude',
+        profile: 'zcode',
         profileConfig,
         botOwnerId: 'ou-owner',
         ownerRefreshState: 'ok',
@@ -212,10 +212,11 @@ function profile(
   comments: unknown,
 ): ProfileConfig {
   const config = createDefaultProfileConfig({
-    agentKind: 'claude',
+    agentKind: 'zcode',
     accounts: { app: { id: 'cli_test', secret: '${APP_SECRET}', tenant: 'feishu' } },
     access: { allowedUsers },
     sandbox: { defaultMode: 'read-only', maxMode: 'workspace-write' },
+    zcode: { runtimePath: join(defaultWorkspace, 'zcode.cjs') },
   });
   config.comments = comments as ProfileConfig['comments'];
   config.workspaces.default = defaultWorkspace;

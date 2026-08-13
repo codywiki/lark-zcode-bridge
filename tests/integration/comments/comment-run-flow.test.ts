@@ -6,7 +6,7 @@ import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions } from '../../
 import { ActiveRuns } from '../../../src/bot/active-runs.js';
 import { handleCommentMention } from '../../../src/bot/comments.js';
 import { commentDocumentScopeId, commentTokenDigest } from '../../../src/bot/comment-resource.js';
-import { codexCapability } from '../../../src/agent/capability.js';
+import { zcodeCapability } from '../../../src/agent/capability.js';
 import { ProcessPool } from '../../../src/bot/process-pool.js';
 import { createDefaultProfileConfig, type ProfileConfig } from '../../../src/config/profile-schema.js';
 import { evaluateRunPolicy } from '../../../src/policy/run-policy.js';
@@ -66,7 +66,7 @@ describe('comment run flow', () => {
     expect(h.inThreadReplies).toEqual(['answer one']);
   });
 
-  it('shares Claude sessions across different comment threads in the same document', async () => {
+  it('shares agent sessions across different comment threads in the same document', async () => {
     const h = await createHarness({
       agentTexts: ['first answer', 'second answer', 'third answer'],
       sessionIds: ['session-one', 'session-two', 'session-three'],
@@ -84,29 +84,11 @@ describe('comment run flow', () => {
     expect(h.sessions.resumeFor('doc:doc-token', await realpath(h.tmp.workspace))).toBeUndefined();
   });
 
-  it('shares Codex threads across different comment threads in the same document', async () => {
+  it('keeps pre-tool progress text out of every comment reply', async () => {
     const h = await createHarness({
-      agentKind: 'codex',
-      agentTexts: ['first answer', 'second answer', 'third answer'],
-      threadIds: ['thread-one', 'thread-two', 'thread-three'],
-    });
-
-    await handleCommentMention(h.deps(event({ commentId: 'comment-1', replyId: 'reply-1' })));
-    await handleCommentMention(h.deps(event({ commentId: 'comment-2', replyId: 'reply-2' })));
-    await handleCommentMention(h.deps(event({ commentId: 'comment-1', replyId: 'reply-1' })));
-
-    expect(h.agent.runOptions).toHaveLength(3);
-    expect(h.agent.runOptions[0]?.threadId).toBeUndefined();
-    expect(h.agent.runOptions[1]?.threadId).toBe('thread-one');
-    expect(h.agent.runOptions[2]?.threadId).toBe('thread-two');
-  });
-
-  it('keeps Codex pre-tool progress text out of every comment reply', async () => {
-    const h = await createHarness({
-      agentKind: 'codex',
       agentEventRuns: [
-        codexRunWithProgress('thread-one', '我先读取文档再处理。', 'first final'),
-        codexRunWithProgress('thread-two', '我继续读取上下文。', 'second final'),
+        zcodeRunWithProgress('session-one', '我先读取文档再处理。', 'first final'),
+        zcodeRunWithProgress('session-two', '我继续读取上下文。', 'second final'),
       ],
     });
 
@@ -116,20 +98,19 @@ describe('comment run flow', () => {
     expect(h.inThreadReplies).toEqual(['first final', 'second final']);
   });
 
-  it('does not reuse an existing Codex thread while another document comment run is active', async () => {
+  it('does not reuse an existing session while another document comment run is active', async () => {
     const h = await createBlockingHarness({
-      agentKind: 'codex',
-      threadIds: ['thread-one', 'thread-two'],
+      sessionIds: ['session-one', 'session-two'],
     });
-    await seedCodexCatalog(h, 'seed-thread');
+    await seedZcodeCatalog(h, 'seed-session');
 
     const first = handleCommentMention(h.deps(event({ commentId: 'comment-1', replyId: 'reply-1' })));
     await waitFor(() => h.agent.runOptions.length === 1);
     const second = handleCommentMention(h.deps(event({ commentId: 'comment-2', replyId: 'reply-2' })));
     await waitFor(() => h.agent.runOptions.length === 2);
 
-    expect(h.agent.runOptions[0]?.threadId).toBe('seed-thread');
-    expect(h.agent.runOptions[1]?.threadId).toBeUndefined();
+    expect(h.agent.runOptions[0]?.sessionId).toBe('seed-session');
+    expect(h.agent.runOptions[1]?.sessionId).toBeUndefined();
 
     h.agent.finishRun(0);
     h.agent.finishRun(1);
@@ -163,7 +144,7 @@ describe('comment run flow', () => {
 
     await handleCommentMention(h.deps(event({ commentId: 'comment-1', replyId: 'reply-1' })));
 
-    const managedCwd = await realpath(join(`${h.tmp.profile}-workspaces`, 'claude', 'default'));
+    const managedCwd = await realpath(join(`${h.tmp.profile}-workspaces`, 'zcode', 'default'));
     expect(h.agent.runOptions).toHaveLength(1);
     expect(h.agent.runOptions[0]?.cwd).toBe(managedCwd);
     expect(h.inThreadReplies).toEqual(['answer one']);
@@ -191,11 +172,9 @@ describe('comment run flow', () => {
 });
 
 async function createHarness(options: {
-  agentKind?: 'claude' | 'codex';
   agentTexts?: string[];
   agentEventRuns?: AgentEvent[][];
   sessionIds?: string[];
-  threadIds?: string[];
   reactionFails?: boolean;
 } = {}): Promise<{
   tmp: TmpProfile;
@@ -212,30 +191,24 @@ async function createHarness(options: {
   const tmp = await createTmpProfile('comment-run-flow-');
   const requests: RequestRecord[] = [];
   const inThreadReplies: string[] = [];
-  const agentKind = options.agentKind ?? 'claude';
   const agentTexts = options.agentTexts ?? ['answer one'];
   const sessionIds = options.sessionIds ?? ['session-one'];
-  const threadIds = options.threadIds ?? ['thread-one'];
   const eventRuns: AgentEvent[][] =
     options.agentEventRuns ??
     agentTexts.map((text, index) => [
       {
         type: 'system',
-        ...(agentKind === 'codex'
-          ? { threadId: threadIds[index] ?? `thread-${index}` }
-          : { sessionId: sessionIds[index] ?? `session-${index}` }),
+        sessionId: sessionIds[index] ?? `session-${index}`,
         cwd: tmp.workspace,
       },
       { type: 'text', delta: text },
       {
         type: 'done',
-        ...(agentKind === 'codex'
-          ? { threadId: threadIds[index] ?? `thread-${index}` }
-          : { sessionId: sessionIds[index] ?? `session-${index}` }),
+        sessionId: sessionIds[index] ?? `session-${index}`,
         terminationReason: 'normal',
       },
     ]);
-  const agent = new FakeAgentAdapter({ events: eventRuns });
+  const agent = new FakeAgentAdapter({ id: 'zcode', events: eventRuns });
   const rawClient: FakeCommentChannel['rawClient'] = {
     async request(input) {
       requests.push(input);
@@ -279,7 +252,7 @@ async function createHarness(options: {
   const sessionCatalog = new SessionCatalog(join(tmp.profile, 'session-catalog.json'));
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
   workspaces.setCwd(docSessionScope('doc-token'), tmp.workspace);
-  const profileConfig = profile(tmp.workspace, agentKind);
+  const profileConfig = profile(tmp.workspace);
   const activeRuns = new ActiveRuns();
   const executor = new RunExecutor({
     agent,
@@ -312,7 +285,7 @@ async function createHarness(options: {
       activeRuns,
       executor,
       controls: {
-        profile: 'claude',
+        profile: 'zcode',
         profileConfig,
         botOwnerId: 'ou-owner',
         ownerRefreshState: 'ok',
@@ -328,8 +301,7 @@ async function createHarness(options: {
 }
 
 async function createBlockingHarness(options: {
-  agentKind: 'codex';
-  threadIds: string[];
+  sessionIds: string[];
 }): Promise<{
   tmp: TmpProfile;
   agent: BlockingAgentAdapter;
@@ -340,7 +312,7 @@ async function createBlockingHarness(options: {
 }> {
   const tmp = await createTmpProfile('comment-run-flow-blocking-');
   const requests: RequestRecord[] = [];
-  const agent = new BlockingAgentAdapter(options.threadIds);
+  const agent = new BlockingAgentAdapter(options.sessionIds);
   const rawClient: FakeCommentChannel['rawClient'] = {
     async request(input) {
       requests.push(input);
@@ -376,7 +348,7 @@ async function createBlockingHarness(options: {
   const sessionCatalog = new SessionCatalog(join(tmp.profile, 'session-catalog.json'));
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
   workspaces.setCwd(docSessionScope('doc-token'), tmp.workspace);
-  const profileConfig = profile(tmp.workspace, options.agentKind);
+  const profileConfig = profile(tmp.workspace);
   const activeRuns = new ActiveRuns();
   const executor = new RunExecutor({
     agent,
@@ -405,7 +377,7 @@ async function createBlockingHarness(options: {
       activeRuns,
       executor,
       controls: {
-        profile: 'claude',
+        profile: 'zcode',
         profileConfig,
         botOwnerId: 'ou-owner',
         ownerRefreshState: 'ok',
@@ -420,12 +392,12 @@ async function createBlockingHarness(options: {
   };
 }
 
-async function seedCodexCatalog(
+async function seedZcodeCatalog(
   h: Awaited<ReturnType<typeof createBlockingHarness>>,
-  threadId: string,
+  sessionId: string,
 ): Promise<void> {
   const cwdRealpath = await realpath(h.tmp.workspace);
-  const capability = codexCapability(h.profileConfig);
+  const capability = zcodeCapability(h.profileConfig);
   const policy = evaluateRunPolicy({
     scope: {
       source: 'comment',
@@ -441,26 +413,24 @@ async function seedCodexCatalog(
     capability,
     profileConfig: h.profileConfig,
     now: Date.now(),
-    codexHome: h.profileConfig.codex?.codexHome,
-    inheritCodexHome: h.profileConfig.codex?.inheritCodexHome,
   });
   if (!policy.ok) throw new Error('failed to seed policy');
   h.sessionCatalog.upsertActive({
     scopeId: docSessionScope('doc-token'),
-    agentId: 'codex',
+    agentId: 'zcode',
     cwdRealpath,
     policyFingerprint: policy.policyFingerprint,
-    threadId,
+    sessionId,
   });
 }
 
 class BlockingAgentAdapter implements AgentAdapter {
-  readonly id = 'fake-agent';
-  readonly displayName = 'Fake Agent';
+  readonly id = 'zcode';
+  readonly displayName = 'Fake ZCode';
   readonly runOptions: AgentRunOptions[] = [];
   private readonly finishers: Array<() => void> = [];
 
-  constructor(private readonly threadIds: string[]) {}
+  constructor(private readonly sessionIds: string[]) {}
 
   async isAvailable(): Promise<boolean> {
     return true;
@@ -497,13 +467,13 @@ class BlockingAgentAdapter implements AgentAdapter {
     done: Promise<void>,
     isStopped: () => boolean,
   ): AsyncIterable<AgentEvent> {
-    yield { type: 'system', threadId: this.threadIds[index] ?? `thread-${index}` };
+    yield { type: 'system', sessionId: this.sessionIds[index] ?? `session-${index}` };
     yield { type: 'text', delta: `answer ${index}` };
     await done;
     if (!isStopped()) {
       yield {
         type: 'done',
-        threadId: this.threadIds[index] ?? `thread-${index}`,
+        sessionId: this.sessionIds[index] ?? `session-${index}`,
         terminationReason: 'normal',
       };
     }
@@ -518,31 +488,31 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   throw new Error('timed out waiting for condition');
 }
 
-function profile(defaultWorkspace: string, agentKind: 'claude' | 'codex' = 'claude'): ProfileConfig {
+function profile(defaultWorkspace: string): ProfileConfig {
   const config = createDefaultProfileConfig({
-    agentKind,
+    agentKind: 'zcode',
     accounts: { app: { id: 'cli_test', secret: '${APP_SECRET}', tenant: 'feishu' } },
     access: { allowedUsers: ['ou-user'] },
     sandbox: { defaultMode: 'read-only', maxMode: 'workspace-write' },
-    ...(agentKind === 'codex' ? { codex: { binaryPath: 'codex' } } : {}),
+    zcode: { runtimePath: join(defaultWorkspace, 'zcode.cjs') },
   });
   config.workspaces.default = defaultWorkspace;
   return config;
 }
 
-function codexRunWithProgress(threadId: string, progress: string, finalAnswer: string): AgentEvent[] {
+function zcodeRunWithProgress(sessionId: string, progress: string, finalAnswer: string): AgentEvent[] {
   return [
-    { type: 'system', threadId },
+    { type: 'system', sessionId },
     { type: 'text', delta: progress },
     {
       type: 'tool_use',
-      id: `${threadId}-tool`,
+      id: `${sessionId}-tool`,
       name: 'command_execution',
       input: { command: 'lark-cli docs +fetch --api-version v2 --doc doc-token --doc-format markdown' },
     },
-    { type: 'tool_result', id: `${threadId}-tool`, output: 'doc body', isError: false },
+    { type: 'tool_result', id: `${sessionId}-tool`, output: 'doc body', isError: false },
     { type: 'final_text', content: finalAnswer },
-    { type: 'done', threadId, terminationReason: 'normal' },
+    { type: 'done', sessionId, terminationReason: 'normal' },
   ];
 }
 
