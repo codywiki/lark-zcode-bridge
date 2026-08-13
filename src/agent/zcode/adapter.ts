@@ -26,10 +26,13 @@ import type {
 } from '../types';
 import {
   applyZcodeModelOverride,
+  applyZcodeReasoningOverride,
   isZcodeModelConfigReady,
   prepareZcodeProfileHome,
   ZCODE_API_KEY_ENV,
   ZCODE_DEFAULT_RUNTIME_PATH,
+  ZCODE_REASONING_LEVELS,
+  type ZcodeReasoningLevel,
 } from './profile-home';
 
 export const ZCODE_RUNTIME_FAILURE_MESSAGE =
@@ -180,6 +183,11 @@ export class ZcodeAdapter implements AgentAdapter {
     if (opts.model) {
       applyZcodeModelOverride(prepared.homeDir, opts.model);
     }
+    // Same for /effort: reconcile the reasoning block on every run so a
+    // cleared session override deterministically returns to zcode's builtin
+    // default (max). Unknown values are ignored rather than failing the run.
+    const effort = toZcodeReasoningLevel(opts.reasoningEffort);
+    applyZcodeReasoningOverride(prepared.homeDir, effort);
 
     const mode = zcodePermissionMode(opts.sandbox);
     const args: string[] = [
@@ -267,6 +275,18 @@ export function zcodePermissionMode(sandbox: CodexSandboxMode | undefined): Zcod
     case 'danger-full-access':
       return 'yolo';
   }
+}
+
+/**
+ * The session store carries free-form strings (shared with other adapters'
+ * vocabularies upstream); clamp to what the GLM runtime actually understands
+ * and treat anything else as "no override" → builtin default.
+ */
+function toZcodeReasoningLevel(effort: string | undefined): ZcodeReasoningLevel | undefined {
+  if (!effort) return undefined;
+  return (ZCODE_REASONING_LEVELS as readonly string[]).includes(effort)
+    ? (effort as ZcodeReasoningLevel)
+    : undefined;
 }
 
 async function* createEventStream(

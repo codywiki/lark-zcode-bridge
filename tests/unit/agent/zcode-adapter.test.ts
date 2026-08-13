@@ -172,4 +172,57 @@ console.log(JSON.stringify({
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ type: 'error', terminationReason: 'failed' });
   });
+
+  function readIsolatedConfig(): Record<string, unknown> {
+    const configFile = join(stateDir, 'zcode-home', '.zcode', 'cli', 'config.json');
+    return JSON.parse(readFileSync(configFile, 'utf8')) as Record<string, unknown>;
+  }
+
+  function mainModelReasoning(): unknown {
+    const config = readIsolatedConfig();
+    const provider = config.provider as Record<
+      string,
+      { models: Record<string, Record<string, unknown>> }
+    >;
+    return provider.bigmodel!.models['glm-5.2']!.reasoning;
+  }
+
+  it('writes the reasoning block into the isolated config when effort is set', async () => {
+    process.env.ARGV_CAPTURE = join(stateDir, 'argv.json');
+    process.env.ZCODE_API_KEY = 'test-key';
+    const adapter = makeAdapter();
+    await collect(
+      adapter.run({ runId: 'r5', prompt: 'hi', cwd: stateDir, reasoningEffort: 'high' }),
+    );
+    const reasoning = mainModelReasoning() as Record<string, unknown>;
+    expect(reasoning.defaultLevel).toBe('high');
+    expect(reasoning.providerOptionsByLevel).toMatchObject({
+      high: { anthropic: { effort: 'high', thinking: { budgetTokens: 16000 } } },
+    });
+  });
+
+  it('removes the reasoning block when the session effort override is cleared', async () => {
+    process.env.ARGV_CAPTURE = join(stateDir, 'argv.json');
+    process.env.ZCODE_API_KEY = 'test-key';
+    const adapter = makeAdapter();
+    await collect(
+      adapter.run({ runId: 'r6', prompt: 'hi', cwd: stateDir, reasoningEffort: 'nothink' }),
+    );
+    expect((mainModelReasoning() as Record<string, unknown>).defaultLevel).toBe('nothink');
+
+    // Next run without an override must deterministically return to the
+    // builtin default — the bridge owns this isolated config.
+    await collect(adapter.run({ runId: 'r7', prompt: 'hi', cwd: stateDir }));
+    expect(mainModelReasoning()).toBeUndefined();
+  });
+
+  it('ignores effort values outside the zcode vocabulary', async () => {
+    process.env.ARGV_CAPTURE = join(stateDir, 'argv.json');
+    process.env.ZCODE_API_KEY = 'test-key';
+    const adapter = makeAdapter();
+    await collect(
+      adapter.run({ runId: 'r8', prompt: 'hi', cwd: stateDir, reasoningEffort: 'ultra' }),
+    );
+    expect(mainModelReasoning()).toBeUndefined();
+  });
 });

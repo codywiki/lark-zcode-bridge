@@ -132,6 +132,7 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
   }
 
   const sessionModel = input.sessions.getModel(input.scopeId);
+  const sessionEffort = input.sessions.getReasoningEffort(input.scopeId);
 
   let execution: RunExecution;
   try {
@@ -140,6 +141,7 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
       policy,
       sessionId,
       model: sessionModel,
+      ...(sessionEffort ? { reasoningEffort: sessionEffort } : {}),
       images: policy.attachments
         .filter((attachment) => attachment.kind === 'image' && attachment.decision === 'accepted')
         .map((attachment) => attachment.path)

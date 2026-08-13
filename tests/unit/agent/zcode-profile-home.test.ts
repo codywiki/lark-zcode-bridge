@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   applyZcodeModelOverride,
+  applyZcodeReasoningOverride,
   isZcodeModelConfigReady,
   prepareZcodeProfileHome,
   setZcodeModelConfigApiKey,
@@ -11,6 +12,7 @@ import {
   zcodeModelConfigFile,
   ZCODE_DEFAULT_BASE_URL,
   ZCODE_DEFAULT_MODEL,
+  ZCODE_REASONING_LEVELS,
 } from '../../../src/agent/zcode/profile-home.js';
 
 describe('zcode profile-home', () => {
@@ -108,5 +110,101 @@ describe('zcode profile-home', () => {
     const prepared = prepareZcodeProfileHome(stateDir);
     writeFileSync(prepared.configFile, '{broken', 'utf8');
     expect(() => prepareZcodeProfileHome(stateDir)).toThrow(/not valid JSON/);
+  });
+
+  function mainModelEntry(homeDir: string): Record<string, unknown> {
+    const config = readConfig(homeDir);
+    const provider = config.provider as Record<
+      string,
+      { models: Record<string, Record<string, unknown>> }
+    >;
+    return provider.bigmodel!.models['glm-5.2']!;
+  }
+
+  it('applyZcodeReasoningOverride writes the full mapping for high', () => {
+    const prepared = prepareZcodeProfileHome(stateDir, { apiKey: 'k' });
+    expect(applyZcodeReasoningOverride(prepared.homeDir, 'high')).toBe(true);
+    const reasoning = mainModelEntry(prepared.homeDir).reasoning as Record<string, unknown>;
+    expect(reasoning.enabled).toBe(true);
+    expect(reasoning.levels).toEqual([...ZCODE_REASONING_LEVELS]);
+    expect(reasoning.defaultLevel).toBe('high');
+    // Partial blocks make zcode send NO thinking config at all — the full
+    // providerOptionsByLevel mapping must always be present.
+    expect(reasoning.providerOptionsByLevel).toEqual({
+      max: { anthropic: { effort: 'max', thinking: { budgetTokens: 32000, type: 'enabled' } } },
+      high: { anthropic: { effort: 'high', thinking: { budgetTokens: 16000, type: 'enabled' } } },
+      nothink: { anthropic: { thinking: { type: 'disabled' } } },
+    });
+  });
+
+  it('applyZcodeReasoningOverride disables thinking for nothink', () => {
+    const prepared = prepareZcodeProfileHome(stateDir, { apiKey: 'k' });
+    expect(applyZcodeReasoningOverride(prepared.homeDir, 'nothink')).toBe(true);
+    const reasoning = mainModelEntry(prepared.homeDir).reasoning as {
+      defaultLevel: string;
+      providerOptionsByLevel: Record<string, unknown>;
+    };
+    expect(reasoning.defaultLevel).toBe('nothink');
+    expect(reasoning.providerOptionsByLevel.nothink).toEqual({
+      anthropic: { thinking: { type: 'disabled' } },
+    });
+  });
+
+  it('applyZcodeReasoningOverride removes the block for undefined and max', () => {
+    const prepared = prepareZcodeProfileHome(stateDir, { apiKey: 'k' });
+    applyZcodeReasoningOverride(prepared.homeDir, 'high');
+    expect(mainModelEntry(prepared.homeDir).reasoning).toBeDefined();
+
+    expect(applyZcodeReasoningOverride(prepared.homeDir, 'max')).toBe(true);
+    expect(mainModelEntry(prepared.homeDir).reasoning).toBeUndefined();
+
+    applyZcodeReasoningOverride(prepared.homeDir, 'high');
+    expect(applyZcodeReasoningOverride(prepared.homeDir, undefined)).toBe(true);
+    expect(mainModelEntry(prepared.homeDir).reasoning).toBeUndefined();
+  });
+
+  it('applyZcodeReasoningOverride preserves the apiKey and other model fields', () => {
+    const prepared = prepareZcodeProfileHome(stateDir, { apiKey: 'secret-k' });
+    applyZcodeReasoningOverride(prepared.homeDir, 'high');
+    const config = readConfig(prepared.homeDir);
+    const provider = config.provider as Record<
+      string,
+      { options: { apiKey: string }; models: Record<string, Record<string, unknown>> }
+    >;
+    expect(provider.bigmodel?.options.apiKey).toBe('secret-k');
+    expect(provider.bigmodel?.models['glm-5.2']?.name).toBe('GLM-5.2');
+    expect(provider.bigmodel?.models['glm-5-turbo']).toBeDefined();
+    // perms stay owner-only after the atomic rewrite
+    expect(statSync(zcodeModelConfigFile(prepared.homeDir)).mode & 0o777).toBe(0o600);
+  });
+
+  it('applyZcodeReasoningOverride is a no-op when the config already matches', () => {
+    const prepared = prepareZcodeProfileHome(stateDir, { apiKey: 'k' });
+    applyZcodeReasoningOverride(prepared.homeDir, 'high');
+    const before = readFileSync(zcodeModelConfigFile(prepared.homeDir), 'utf8');
+    expect(applyZcodeReasoningOverride(prepared.homeDir, 'high')).toBe(true);
+    expect(readFileSync(zcodeModelConfigFile(prepared.homeDir), 'utf8')).toBe(before);
+  });
+
+  it('applyZcodeReasoningOverride follows the main model after /model switches', () => {
+    const prepared = prepareZcodeProfileHome(stateDir, { apiKey: 'k' });
+    applyZcodeModelOverride(prepared.homeDir, 'bigmodel/glm-5-turbo');
+    expect(applyZcodeReasoningOverride(prepared.homeDir, 'high')).toBe(true);
+    const config = readConfig(prepared.homeDir);
+    const provider = config.provider as Record<
+      string,
+      { models: Record<string, Record<string, unknown>> }
+    >;
+    const turbo = provider.bigmodel!.models['glm-5-turbo']!;
+    expect((turbo.reasoning as { defaultLevel: string }).defaultLevel).toBe('high');
+    expect(provider.bigmodel!.models['glm-5.2']!.reasoning).toBeUndefined();
+  });
+
+  it('applyZcodeReasoningOverride returns false when the config is missing or broken', () => {
+    const homeDir = zcodeHomeDir(stateDir);
+    expect(applyZcodeReasoningOverride(homeDir, 'high')).toBe(false);
+    mkdirSync(join(homeDir, '.zcode', 'cli'), { recursive: true });
+    writeFileSync(zcodeModelConfigFile(homeDir), 'not json', 'utf8');
+    expect(applyZcodeReasoningOverride(homeDir, 'high')).toBe(false);
   });
 });

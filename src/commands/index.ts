@@ -160,6 +160,7 @@ const handlers: Record<string, Handler> = {
   '/stop': handleStop,
   '/timeout': handleTimeout,
   '/model': handleModel,
+  '/effort': handleEffort,
   '/ps': handlePs,
   '/exit': handleExit,
   '/doctor': handleDoctor,
@@ -891,7 +892,7 @@ function parseTimeoutTarget(input: string, currentScope: string): {
 }
 
 const ZCODE_MODEL_USAGE =
-  '\n\n用法:\n- `/model` 查看当前 session 的模型覆盖\n- `/model <id>` 设置模型,如 `/model glm-5.2` / `/model glm-5-turbo`(写入本 profile 独立配置)\n- `/model default` 清除覆盖,回退到 profile 默认模型\n\n_注:切换模型会结束当前可恢复会话,下一条消息会启动新 session_';
+  '\n\n用法:\n- `/model` 查看当前 session 的模型覆盖\n- `/model <id>` 设置模型,如 `/model glm-5.2` / `/model glm-5-turbo`(写入本 profile 独立配置)\n- `/model <id> <max|high|nothink>` 同时设置推理强度(等同再敲一次 `/effort`)\n- `/model default` 清除覆盖,回退到 profile 默认模型\n\n_注:切换模型会结束当前可恢复会话,下一条消息会启动新 session_';
 async function handleModel(args: string, ctx: CommandContext): Promise<void> {
   const trimmed = args.trim();
   const usage = ZCODE_MODEL_USAGE;
@@ -922,8 +923,7 @@ async function handleModel(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
 
-  // ZCode headless 不支持 per-run 推理强度参数，只切换模型 id。
-  const parsed = parseModelArgs(trimmed, usage, { allowReasoningEffort: false });
+  const parsed = parseModelArgs(trimmed, usage);
   if (!parsed.ok) {
     await reply(ctx, parsed.message);
     return;
@@ -953,10 +953,50 @@ async function handleModel(args: string, ctx: CommandContext): Promise<void> {
   );
 }
 
+const ZCODE_EFFORT_USAGE =
+  '\n\n用法:\n- `/effort` 查看当前 session 的推理强度\n- `/effort max|high|nothink` 设置推理强度(别名:最高/高/无/关闭)\n- `/effort default` 清除覆盖,回退到 ZCode 默认(max)\n\n_注:推理强度按请求生效,不打断当前会话,下一条消息即生效_';
+async function handleEffort(args: string, ctx: CommandContext): Promise<void> {
+  const trimmed = args.trim();
+
+  if (!trimmed) {
+    const current = ctx.sessions.getReasoningEffort(ctx.scope);
+    await reply(
+      ctx,
+      current
+        ? `🧠 当前 session 推理强度覆盖:\`${current}\`${ZCODE_EFFORT_USAGE}`
+        : `🧠 当前 session 未设置推理强度覆盖,使用 ZCode 默认(max)。${ZCODE_EFFORT_USAGE}`,
+    );
+    return;
+  }
+
+  if (trimmed.toLowerCase() === 'default' || trimmed.toLowerCase() === 'clear') {
+    const cleared = ctx.sessions.clearReasoningEffortOverride(ctx.scope);
+    log.info('command', 'effort-clear', { scope: ctx.scope, cleared });
+    await reply(
+      ctx,
+      cleared
+        ? '✅ 已清除推理强度覆盖,回退到 ZCode 默认(max)。下一条消息生效,会话保持连续。'
+        : '当前 session 本来就没设置推理强度覆盖。',
+    );
+    return;
+  }
+
+  const effort = normalizeReasoningEffort(trimmed);
+  if (!effort) {
+    await reply(ctx, `❌ 推理强度只支持 max / high / nothink。${ZCODE_EFFORT_USAGE}`);
+    return;
+  }
+  ctx.sessions.setReasoningEffort(ctx.scope, effort);
+  log.info('command', 'effort-set', { scope: ctx.scope, effort });
+  await reply(
+    ctx,
+    `✅ 之后本 session 的运行将使用推理强度 \`${effort}\`。下一条消息生效,会话保持连续。`,
+  );
+}
+
 function parseModelArgs(
   input: string,
   usage = ZCODE_MODEL_USAGE,
-  options: { allowReasoningEffort?: boolean } = {},
 ):
   | { ok: true; model: string; reasoningEffort?: string }
   | { ok: false; message: string } {
@@ -964,12 +1004,9 @@ function parseModelArgs(
   if (parts.length === 0 || parts.length > 2) {
     return { ok: false, message: `❌ 用法错误。${usage}` };
   }
-  if (parts[1] && options.allowReasoningEffort === false) {
-    return { ok: false, message: `❌ ZCode headless 当前只支持切换模型 id，不支持推理强度参数。${usage}` };
-  }
   const effort = parts[1] ? normalizeReasoningEffort(parts[1]) : undefined;
   if (parts[1] && !effort) {
-    return { ok: false, message: `❌ 推理强度只支持 minimal / low / medium / high / xhigh / ultra。${usage}` };
+    return { ok: false, message: `❌ 推理强度只支持 max / high / nothink。${usage}` };
   }
   return {
     ok: true,
@@ -978,22 +1015,25 @@ function parseModelArgs(
   };
 }
 
+/**
+ * ZCode/GLM 推理强度词表 — 与 zcode 0.16.3 运行时的 levels
+ * (max/high/nothink) 一一对应;上游 codex 词表(minimal/low/medium/xhigh/
+ * ultra)在这里一律拒绝,避免把不存在的 level 写进配置。
+ */
 function normalizeReasoningEffort(input: string): string | undefined {
   const normalized = input.toLowerCase();
-  if (normalized === 'minimal' || normalized === 'min') return 'minimal';
-  if (normalized === 'low' || normalized === '低') return 'low';
-  if (normalized === 'medium' || normalized === 'med' || normalized === '中') return 'medium';
+  if (normalized === 'max' || normalized === '最高') return 'max';
+  if (normalized === 'high' || normalized === '高') return 'high';
   if (
-    normalized === 'xhigh' ||
-    normalized === 'extra-high' ||
-    normalized === 'extra_high' ||
-    normalized === '超高'
-  ) return 'xhigh';
-  if (normalized === 'ultra' || normalized === 'max' || normalized === '最高') return 'ultra';
-  if (
-    normalized === 'high' ||
-    normalized === '高'
-  ) return 'high';
+    normalized === 'nothink' ||
+    normalized === 'no-think' ||
+    normalized === 'none' ||
+    normalized === 'off' ||
+    normalized === '无' ||
+    normalized === '关闭'
+  ) {
+    return 'nothink';
+  }
   return undefined;
 }
 

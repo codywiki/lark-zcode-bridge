@@ -49,7 +49,7 @@ lark-zcode-bridge profile login zcode      # prompts for the API key
 ZCODE_API_KEY=<key> lark-zcode-bridge profile login zcode
 ```
 
-The generated model config targets BigModel Coding Plan (`glm-5.2` main, `glm-5-turbo` lite). Switch the main model in chat with `/model glm-5-turbo`, or edit `zcode-home/.zcode/cli/config.json` for full control (custom providers, z.ai base URL, etc.).
+The generated model config targets BigModel Coding Plan (`glm-5.2` main, `glm-5-turbo` lite). Switch the main model in chat with `/model glm-5-turbo` and the reasoning effort with `/effort high` (`max`/`high`/`nothink`, default `max`), or edit `zcode-home/.zcode/cli/config.json` for full control (custom providers, z.ai base URL, etc.).
 
 ## Permissions
 
@@ -103,7 +103,8 @@ The bridge projects a profile-local lark-cli directory (`profiles/<name>/lark-cl
 - `/new` — start a fresh session
 - `/cd <path>` — switch workspace; `/ws list|use|save` — manage saved workspaces
 - `/status` — current session, cwd, permission mode
-- `/model <id>` — switch the profile's main model
+- `/model <id>` — switch the profile's main model (`/model <id> <max|high|nothink>` also sets reasoning effort)
+- `/effort <max|high|nothink>` — switch the session's reasoning effort (per-request; does not reset the session)
 - `/resume` — resume the current catalog-tracked session
 - `/stop` — interrupt the running task
 - `/help` — full command card

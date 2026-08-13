@@ -145,6 +145,91 @@ export function applyZcodeModelOverride(homeDir: string, model: string): boolean
   return true;
 }
 
+/**
+ * Reasoning levels understood by the GLM models behind BigModel / z.ai,
+ * reverse-engineered from zcode 0.16.3 (`Rx/j1/lU` + `xKo()` in zcode.cjs)
+ * and verified live against the Anthropic-compatible endpoint:
+ *   max     → output_config.effort=max,  thinking budget 32000 (builtin default)
+ *   high    → output_config.effort=high, thinking budget 16000
+ *   nothink → thinking disabled entirely (no effort field)
+ */
+export const ZCODE_REASONING_LEVELS = ['max', 'high', 'nothink'] as const;
+export type ZcodeReasoningLevel = (typeof ZCODE_REASONING_LEVELS)[number];
+
+const ZCODE_REASONING_PROVIDER_OPTIONS: Record<ZcodeReasoningLevel, unknown> = {
+  max: { anthropic: { effort: 'max', thinking: { budgetTokens: 32000, type: 'enabled' } } },
+  high: { anthropic: { effort: 'high', thinking: { budgetTokens: 16000, type: 'enabled' } } },
+  nothink: { anthropic: { thinking: { type: 'disabled' } } },
+};
+
+/**
+ * Reconcile the main model's `reasoning` block in the isolated config with
+ * the requested level. `undefined` (or 'max', the builtin default) removes
+ * the override so zcode's own defaults apply; any other level writes the full
+ * levels + providerOptionsByLevel mapping — a partial block (e.g. only
+ * defaultLevel) makes zcode send NO thinking/output_config at all, which is
+ * silently wrong, so the mapping is always written in full.
+ *
+ * Returns false when the config is missing/unparseable or the main model
+ * entry cannot be located; the run proceeds with zcode defaults.
+ */
+export function applyZcodeReasoningOverride(
+  homeDir: string,
+  level: ZcodeReasoningLevel | undefined,
+): boolean {
+  const configFile = zcodeModelConfigFile(homeDir);
+  if (!existsSync(configFile)) return false;
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = assertZcodeModelConfigReadable(configFile);
+  } catch {
+    return false;
+  }
+  const entry = findMainModelEntry(parsed);
+  if (!entry) return false;
+  const current = entry.reasoning;
+  const wantsDefault = level === undefined || level === 'max';
+  // No-op when the config already matches intent (avoid a write per run).
+  if (wantsDefault && current === undefined) return true;
+  if (!wantsDefault && isReasoningBlockFor(current, level)) return true;
+  if (wantsDefault) {
+    delete entry.reasoning;
+  } else {
+    entry.reasoning = {
+      enabled: true,
+      levels: [...ZCODE_REASONING_LEVELS],
+      defaultLevel: level,
+      providerOptionsByLevel: ZCODE_REASONING_PROVIDER_OPTIONS,
+    };
+  }
+  writeZcodeModelConfigAtomic(configFile, parsed);
+  return true;
+}
+
+/** Locate the live model entry object for `model.main` ("provider/model"). */
+function findMainModelEntry(
+  parsed: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const main = (parsed.model as { main?: unknown } | undefined)?.main;
+  if (typeof main !== 'string' || !main.includes('/')) return undefined;
+  const slash = main.indexOf('/');
+  const providerName = main.slice(0, slash);
+  const modelId = main.slice(slash + 1);
+  const provider = (parsed.provider as Record<string, unknown> | undefined)?.[providerName];
+  if (!provider || typeof provider !== 'object') return undefined;
+  const models = (provider as { models?: unknown }).models;
+  if (!models || typeof models !== 'object' || Array.isArray(models)) return undefined;
+  const entry = (models as Record<string, unknown>)[modelId];
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return undefined;
+  return entry as Record<string, unknown>;
+}
+
+function isReasoningBlockFor(current: unknown, level: ZcodeReasoningLevel): boolean {
+  if (!current || typeof current !== 'object' || Array.isArray(current)) return false;
+  return (current as { defaultLevel?: unknown }).defaultLevel === level;
+}
+
+
 function buildZcodeModelConfig(options: ZcodeModelConfigOptions): Record<string, unknown> {
   const baseURL = options.baseURL?.trim() || ZCODE_DEFAULT_BASE_URL;
   const mainModel = options.model?.trim() || ZCODE_DEFAULT_MODEL;

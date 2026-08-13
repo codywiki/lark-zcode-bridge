@@ -49,7 +49,7 @@ lark-zcode-bridge profile login zcode      # 交互式输入 API Key
 ZCODE_API_KEY=<key> lark-zcode-bridge profile login zcode
 ```
 
-生成的模型配置默认走 BigModel Coding Plan（主模型 `glm-5.2`，轻量模型 `glm-5-turbo`）。聊天里用 `/model glm-5-turbo` 切换主模型；要自定义 provider、z.ai baseURL 等，直接编辑 `zcode-home/.zcode/cli/config.json`。
+生成的模型配置默认走 BigModel Coding Plan（主模型 `glm-5.2`，轻量模型 `glm-5-turbo`）。聊天里用 `/model glm-5-turbo` 切换主模型、`/effort high` 切换推理强度（`max`/`high`/`nothink`，默认 `max`）；要自定义 provider、z.ai baseURL 等，直接编辑 `zcode-home/.zcode/cli/config.json`。
 
 ## 权限
 
@@ -103,7 +103,8 @@ bridge 会为每个 profile 投影一个当前 profile 的 lark-cli 目录（`pr
 - `/new` — 开新会话
 - `/cd <路径>` — 切换工作区；`/ws list|use|save` — 管理已存工作区
 - `/status` — 查看当前会话、目录、权限模式
-- `/model <id>` — 切换本 profile 的主模型
+- `/model <id>` — 切换本 profile 的主模型（`/model <id> <max|high|nothink>` 可同时设推理强度）
+- `/effort <max|high|nothink>` — 切换当前 session 的推理强度（最高/高/关闭思考；按请求生效，不打断会话）
 - `/resume` — 恢复当前 catalog 记录的会话
 - `/stop` — 打断正在运行的任务
 - `/help` — 完整命令卡片

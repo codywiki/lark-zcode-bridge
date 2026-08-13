@@ -124,6 +124,28 @@ describe('IM run flow', () => {
       reasoningEffort: undefined,
     });
   });
+
+  it('passes session reasoning-effort overrides through to the run executor', async () => {
+    const h = await createHarness({ defaultWorkspace: true });
+    h.sessions.setReasoningEffort('chat-1', 'high');
+
+    const result = await startRunFlow({
+      scopeId: 'chat-1',
+      scope: { source: 'im', chatId: 'chat-1', actorId: 'ou_user' },
+      prompt: 'hello',
+      attachments: [],
+      access: { ok: true, reason: 'allowed-user' },
+      capability: capabilityForProfile(h.profileConfig),
+      profileConfig: h.profileConfig,
+      sessions: h.sessions,
+      workspaces: h.workspaces,
+      executor: h.executor,
+      now: 1000,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(h.agent.runOptions[0]).toMatchObject({ reasoningEffort: 'high' });
+  });
 });
 
 async function createHarness(

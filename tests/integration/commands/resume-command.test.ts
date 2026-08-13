@@ -74,14 +74,68 @@ describe('zcode catalog resume commands', () => {
     expect(lastMarkdown(h.channel)).toContain('下一条消息会启动新 session');
   });
 
-  it('rejects reasoning-effort arguments without changing model state', async () => {
+  it('switches model and reasoning effort together via /model <id> <effort>', async () => {
     const h = await createHarness();
+    h.sessions.set('chat-1', 'sess-current', h.identity.cwdRealpath);
+    h.catalog.upsertActive({ ...h.identity, sessionId: 'sess-current', now: 1000 });
 
     await expect(h.run('/model glm-5.2 high')).resolves.toBe(true);
 
+    expect(h.catalog.activeFor(h.identity)).toBeUndefined();
+    expect(h.sessions.resumeFor('chat-1', h.identity.cwdRealpath)).toBeUndefined();
+    expect(h.sessions.getModel('chat-1')).toBe('glm-5.2');
+    expect(h.sessions.getReasoningEffort('chat-1')).toBe('high');
+    expect(lastMarkdown(h.channel)).toContain('推理强度 `high`');
+    expect(lastMarkdown(h.channel)).toContain('下一条消息会启动新 session');
+  });
+
+  it('rejects codex-vocabulary effort values without changing model state', async () => {
+    const h = await createHarness();
+
+    await expect(h.run('/model glm-5.2 ultra')).resolves.toBe(true);
+
     expect(h.sessions.getModel('chat-1')).toBeUndefined();
     expect(h.sessions.getReasoningEffort('chat-1')).toBeUndefined();
-    expect(lastMarkdown(h.channel)).toContain('只支持切换模型 id');
+    expect(lastMarkdown(h.channel)).toContain('max / high / nothink');
+  });
+
+  it('sets reasoning effort via /effort without resetting the session', async () => {
+    const h = await createHarness();
+    h.sessions.set('chat-1', 'sess-current', h.identity.cwdRealpath);
+    h.catalog.upsertActive({ ...h.identity, sessionId: 'sess-current', now: 1000 });
+
+    await expect(h.run('/effort nothink')).resolves.toBe(true);
+
+    // Effort is per-request: the resumable session must stay intact.
+    expect(h.sessions.getReasoningEffort('chat-1')).toBe('nothink');
+    expect(h.sessions.resumeFor('chat-1', h.identity.cwdRealpath)).toBe('sess-current');
+    expect(h.catalog.activeFor(h.identity)).toMatchObject({ sessionId: 'sess-current' });
+    expect(lastMarkdown(h.channel)).toContain('推理强度 `nothink`');
+    expect(lastMarkdown(h.channel)).toContain('会话保持连续');
+  });
+
+  it('accepts Chinese aliases and shows/clears the effort override', async () => {
+    const h = await createHarness();
+
+    await expect(h.run('/effort 高')).resolves.toBe(true);
+    expect(h.sessions.getReasoningEffort('chat-1')).toBe('high');
+
+    await expect(h.run('/effort')).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('`high`');
+
+    await expect(h.run('/effort default')).resolves.toBe(true);
+    expect(h.sessions.getReasoningEffort('chat-1')).toBeUndefined();
+    expect(lastMarkdown(h.channel)).toContain('默认(max)');
+  });
+
+  it('rejects unknown /effort values without touching state', async () => {
+    const h = await createHarness();
+    h.sessions.setReasoningEffort('chat-1', 'high');
+
+    await expect(h.run('/effort medium')).resolves.toBe(true);
+
+    expect(h.sessions.getReasoningEffort('chat-1')).toBe('high');
+    expect(lastMarkdown(h.channel)).toContain('max / high / nothink');
   });
 
   it('explains that cloud-document comments need no workspace binding', async () => {

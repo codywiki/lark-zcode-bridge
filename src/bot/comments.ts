@@ -245,11 +245,15 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
         cwd: cwdRealpath,
       });
 
+      const commentEffort =
+        sessions.getReasoningEffort(docSessionScopeId) ??
+        sessions.getReasoningEffort(legacyDocSessionScopeId);
       const execution = await deps.executor.submit({
         scopeId: runScopeId,
         policy,
         sessionId,
         model: sessions.getModel(docSessionScopeId) ?? sessions.getModel(legacyDocSessionScopeId),
+        ...(commentEffort ? { reasoningEffort: commentEffort } : {}),
         stopGraceMs: getAgentStopGraceMs(controls.cfg),
         observability: {
           profile: controls.profile,
