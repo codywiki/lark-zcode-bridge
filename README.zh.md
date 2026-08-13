@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-> 社区项目，非飞书/Lark 或 ZCode 官方产品。fork 自 [lark-channel-bridge](https://github.com/zarazhangrui/feishu-claude-code-bridge)（MIT），裁剪为只服务 ZCode 的单 agent bridge。平台支持：**macOS**（运行时在 macOS 版 ZCode 应用包内）；其它平台未验证。
+> 社区项目，非飞书/Lark 或 ZCode 官方产品。fork 自 [lark-channel-bridge](https://github.com/zarazhangrui/feishu-claude-code-bridge)（MIT），裁剪为只服务 ZCode 的单 agent bridge。平台支持：**macOS、Windows、Linux** —— bridge 会在各操作系统上自动定位 ZCode 桌面版内置运行时（非标准路径用 `LARK_ZCODE_BRIDGE_RUNTIME_PATH` 覆盖）。
 
 ## 主要功能
 
@@ -19,7 +19,7 @@
 ## 前置条件
 
 - Node.js **>= 20.12.0**
-- macOS 已安装 **ZCode 桌面版**。bridge 驱动的是应用内置运行时 `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`；非标准安装路径用 `LARK_ZCODE_BRIDGE_RUNTIME_PATH` 覆盖。
+- 已安装 **ZCode 桌面版**。bridge 驱动应用内置运行时，按平台自动定位——macOS 在 `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`，Windows 在 `%LOCALAPPDATA%\Programs\ZCode\resources\glm\zcode.cjs`（或 `Program Files` 下的安装），Linux 在 `/opt/ZCode/resources/glm/zcode.cjs`。非标准安装路径用 `LARK_ZCODE_BRIDGE_RUNTIME_PATH` 覆盖。
 - **GLM Coding Plan** API Key（BigModel 或 z.ai）。
 - 一个飞书 / Lark **PersonalAgent** 应用。首次运行的扫码向导可以帮你创建并绑定。
 
@@ -37,7 +37,7 @@ pnpm add -g lark-zcode-bridge
 lark-zcode-bridge run
 ```
 
-向导会引导你扫码创建/绑定 PersonalAgent 应用，随后以前台方式启动 bridge。要让它常驻（重启后自动拉起），用 `lark-zcode-bridge start` 安装 per-profile service（macOS 上走 launchd）；`lark-zcode-bridge stop` / `restart` 管理服务。
+向导会引导你扫码创建/绑定 PersonalAgent 应用，随后以前台方式启动 bridge。要让它常驻（重启后自动拉起），用 `lark-zcode-bridge start` 安装 per-profile service（macOS 走 launchd，Linux 走 systemd 用户单元，Windows 走任务计划程序 Task Scheduler）；`lark-zcode-bridge stop` / `restart` 管理服务。
 
 ### 配置模型 API Key
 

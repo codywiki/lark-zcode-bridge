@@ -24,8 +24,65 @@ import { dirname, join } from 'node:path';
  * mechanism that actually works — verified against zcode 0.16.3.
  */
 
+/**
+ * Default ZCode runtime path on macOS — the runtime ships inside the
+ * ZCode.app bundle. Kept for backwards compatibility; prefer
+ * {@link defaultZcodeRuntimePathForPlatform} for new code.
+ */
 export const ZCODE_DEFAULT_RUNTIME_PATH =
   '/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs';
+
+/** Relative location of the bundled CLI inside the macOS .app bundle. */
+const MACOS_APP_RUNTIME_REL = 'Contents/Resources/glm/zcode.cjs';
+
+/**
+ * Candidate install roots for the ZCode desktop app on Windows, in priority
+ * order. Electron installers (Squirrel / NSIS per-user) land in %LOCALAPPDATA%;
+ * machine-wide NSIS installs land in %ProgramFiles%. The bundled CLI lives at
+ * `<root>/resources/glm/zcode.cjs` (Electron lowercases the folder).
+ */
+function windowsRuntimeCandidates(env: NodeJS.ProcessEnv): string[] {
+  const rel = join('resources', 'glm', 'zcode.cjs');
+  const roots: string[] = [];
+  const localAppData = env.LOCALAPPDATA;
+  if (localAppData) {
+    // Squirrel (ZCode) and per-user NSIS (Programs\ZCode) layouts.
+    roots.push(join(localAppData, 'ZCode'), join(localAppData, 'Programs', 'ZCode'));
+  }
+  for (const pf of [env.ProgramFiles, env['ProgramFiles(x86)']]) {
+    if (pf) roots.push(join(pf, 'ZCode'));
+  }
+  return roots.map((root) => join(root, rel));
+}
+
+/** Candidate locations for a Linux install (AppImage-extracted / unpacked). */
+function linuxRuntimeCandidates(env: NodeJS.ProcessEnv): string[] {
+  const rel = join('resources', 'glm', 'zcode.cjs');
+  const home = env.HOME ?? '';
+  const roots = ['/opt/ZCode', '/usr/lib/ZCode', ...(home ? [join(home, '.local', 'lib', 'ZCode')] : [])];
+  return roots.map((root) => join(root, rel));
+}
+
+/**
+ * Resolve the default ZCode runtime path for the current platform.
+ *
+ * Returns the first candidate that exists on disk; if none match, returns the
+ * platform's conventional install path so the error message points the user at
+ * a real location. Set `LARK_ZCODE_BRIDGE_RUNTIME_PATH` to override detection
+ * entirely (handled by callers in agent-detection).
+ */
+export function defaultZcodeRuntimePathForPlatform(
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  if (platform === 'darwin') return ZCODE_DEFAULT_RUNTIME_PATH;
+  const candidates = platform === 'win32' ? windowsRuntimeCandidates(env) : linuxRuntimeCandidates(env);
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  // Fall back to the first candidate so the "not found" error names a sane path.
+  return candidates[0] ?? ZCODE_DEFAULT_RUNTIME_PATH;
+}
 export const ZCODE_DEFAULT_BASE_URL = 'https://open.bigmodel.cn/api/anthropic';
 export const ZCODE_ZAI_BASE_URL = 'https://api.z.ai/api/anthropic';
 export const ZCODE_DEFAULT_MODEL = 'bigmodel/glm-5.2';

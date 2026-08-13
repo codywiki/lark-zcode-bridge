@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
 import { access } from 'node:fs/promises';
 import { delimiter, extname, isAbsolute, join } from 'node:path';
-import { ZCODE_DEFAULT_RUNTIME_PATH } from '../agent/zcode/profile-home';
+import { defaultZcodeRuntimePathForPlatform } from '../agent/zcode/profile-home';
 import type { AgentKind } from '../config/profile-schema';
 
 export type { AgentKind } from '../config/profile-schema';
@@ -53,7 +53,7 @@ export async function resolveZcodeRuntimePath(command: string): Promise<string> 
 }
 
 export function defaultZcodeRuntimePath(): string {
-  return process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH ?? ZCODE_DEFAULT_RUNTIME_PATH;
+  return process.env.LARK_ZCODE_BRIDGE_RUNTIME_PATH ?? defaultZcodeRuntimePathForPlatform();
 }
 
 export async function detectInstalledAgents(): Promise<DetectedAgent[]> {

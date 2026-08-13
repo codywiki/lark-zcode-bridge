@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   applyZcodeModelOverride,
   applyZcodeReasoningOverride,
+  defaultZcodeRuntimePathForPlatform,
   isZcodeModelConfigReady,
   prepareZcodeProfileHome,
   setZcodeModelConfigApiKey,
@@ -12,6 +13,7 @@ import {
   zcodeModelConfigFile,
   ZCODE_DEFAULT_BASE_URL,
   ZCODE_DEFAULT_MODEL,
+  ZCODE_DEFAULT_RUNTIME_PATH,
   ZCODE_REASONING_LEVELS,
 } from '../../../src/agent/zcode/profile-home.js';
 
@@ -206,5 +208,51 @@ describe('zcode profile-home', () => {
     mkdirSync(join(homeDir, '.zcode', 'cli'), { recursive: true });
     writeFileSync(zcodeModelConfigFile(homeDir), 'not json', 'utf8');
     expect(applyZcodeReasoningOverride(homeDir, 'high')).toBe(false);
+  });
+});
+
+describe('defaultZcodeRuntimePathForPlatform', () => {
+  it('returns the macOS app-bundle path on darwin', () => {
+    expect(defaultZcodeRuntimePathForPlatform('darwin', {})).toBe(ZCODE_DEFAULT_RUNTIME_PATH);
+  });
+
+  it('prefers an existing Windows install under %LOCALAPPDATA%', () => {
+    const root = mkdtempSync(join(tmpdir(), 'zcode-win-'));
+    try {
+      const localAppData = join(root, 'LocalAppData');
+      const installed = join(localAppData, 'Programs', 'ZCode', 'resources', 'glm', 'zcode.cjs');
+      mkdirSync(join(installed, '..'), { recursive: true });
+      writeFileSync(installed, '// runtime', 'utf8');
+      const resolved = defaultZcodeRuntimePathForPlatform('win32', { LOCALAPPDATA: localAppData });
+      expect(resolved).toBe(installed);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to a conventional Windows path when nothing is installed', () => {
+    const resolved = defaultZcodeRuntimePathForPlatform('win32', {
+      LOCALAPPDATA: 'C:\\Users\\u\\AppData\\Local',
+    });
+    expect(resolved).toContain('ZCode');
+    expect(resolved).toContain('zcode.cjs');
+  });
+
+  it('returns a Linux path under /opt when nothing exists', () => {
+    const resolved = defaultZcodeRuntimePathForPlatform('linux', { HOME: '/nonexistent-home' });
+    expect(resolved).toBe(join('/opt/ZCode', 'resources', 'glm', 'zcode.cjs'));
+  });
+
+  it('detects an existing Linux install under the user home', () => {
+    const root = mkdtempSync(join(tmpdir(), 'zcode-linux-'));
+    try {
+      const home = join(root, 'home');
+      const installed = join(home, '.local', 'lib', 'ZCode', 'resources', 'glm', 'zcode.cjs');
+      mkdirSync(join(installed, '..'), { recursive: true });
+      writeFileSync(installed, '// runtime', 'utf8');
+      expect(defaultZcodeRuntimePathForPlatform('linux', { HOME: home })).toBe(installed);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

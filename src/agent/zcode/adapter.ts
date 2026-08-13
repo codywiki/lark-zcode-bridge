@@ -30,7 +30,7 @@ import {
   isZcodeModelConfigReady,
   prepareZcodeProfileHome,
   ZCODE_API_KEY_ENV,
-  ZCODE_DEFAULT_RUNTIME_PATH,
+  defaultZcodeRuntimePathForPlatform,
   ZCODE_REASONING_LEVELS,
   type ZcodeReasoningLevel,
 } from './profile-home';
@@ -94,7 +94,7 @@ export class ZcodeAdapter implements AgentAdapter {
   private botIdentity: AgentBotIdentity | undefined;
 
   constructor(opts: ZcodeAdapterOptions) {
-    this.runtimePath = opts.runtimePath ?? ZCODE_DEFAULT_RUNTIME_PATH;
+    this.runtimePath = opts.runtimePath ?? defaultZcodeRuntimePathForPlatform();
     this.nodePath = opts.nodePath ?? process.execPath;
     this.recordedVersion = opts.recordedVersion;
     this.defaultModel = opts.defaultModel?.trim() || undefined;
@@ -453,10 +453,11 @@ function zcodeFailureMessage(
 ): string {
   // stderr is provider-controlled text (API errors, stack traces). ZCode does
   // not print the configured API key on failure paths; keep the excerpt short
-  // and strip the app-bundle path noise.
+  // and strip the bundled-runtime path noise (macOS .app bundle, Windows
+  // resources dir, etc.) so the message reads the same on every platform.
   const detail = stderr
     .trim()
-    .replaceAll('/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs', 'zcode')
+    .replaceAll(/[^\s]*zcode\.cjs/g, 'zcode')
     .slice(0, 500);
   const base = runtimeError
     ? `zcode runtime error: ${runtimeError.message}`

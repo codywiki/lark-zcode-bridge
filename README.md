@@ -4,7 +4,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local **ZCode C
 
 [中文 README](./README.zh.md)
 
-> Community project — not an official Feishu/Lark or ZCode product. Forked from [lark-channel-bridge](https://github.com/zarazhangrui/feishu-claude-code-bridge) (MIT), trimmed to a single-agent bridge dedicated to ZCode. Platform support: **macOS** (the runtime ships inside the macOS ZCode app bundle); other platforms are untested.
+> Community project — not an official Feishu/Lark or ZCode product. Forked from [lark-channel-bridge](https://github.com/zarazhangrui/feishu-claude-code-bridge) (MIT), trimmed to a single-agent bridge dedicated to ZCode. Platform support: **macOS, Windows, and Linux** — the bridge locates the ZCode desktop app's bundled runtime on each OS (override with `LARK_ZCODE_BRIDGE_RUNTIME_PATH`).
 
 ## What it does
 
@@ -19,7 +19,8 @@ A lightweight bot that bridges Feishu / Lark messenger with your local **ZCode C
 ## Prerequisites
 
 - Node.js **>= 20.12.0**
-- macOS with the **ZCode desktop app** installed. The bridge drives the bundled runtime at `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`; set `LARK_ZCODE_BRIDGE_RUNTIME_PATH` for non-standard installs.
+- Node.js **>= 20.12.0**
+- The **ZCode desktop app** installed. The bridge drives the app's bundled runtime, located automatically per platform — `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs` on macOS, `%LOCALAPPDATA%\Programs\ZCode\resources\glm\zcode.cjs` (or a `Program Files` install) on Windows, and `/opt/ZCode/resources/glm/zcode.cjs` on Linux. Set `LARK_ZCODE_BRIDGE_RUNTIME_PATH` for non-standard installs.
 - A **GLM Coding Plan** API key (BigModel or z.ai).
 - A Feishu / Lark **PersonalAgent** app. The first-run QR wizard can create and bind one for you.
 
@@ -37,7 +38,7 @@ pnpm add -g lark-zcode-bridge
 lark-zcode-bridge run
 ```
 
-The wizard walks you through creating/binding the PersonalAgent app (QR scan), then starts the bridge in the foreground. To keep it running across logouts, install the per-profile service with `lark-zcode-bridge start` (launchd on macOS); `lark-zcode-bridge stop` / `restart` manage it.
+The wizard walks you through creating/binding the PersonalAgent app (QR scan), then starts the bridge in the foreground. To keep it running across logouts, install the per-profile service with `lark-zcode-bridge start` (launchd on macOS, a systemd user unit on Linux, Task Scheduler on Windows); `lark-zcode-bridge stop` / `restart` manage it.
 
 ### Configure the model API key
 
