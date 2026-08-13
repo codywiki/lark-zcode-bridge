@@ -332,6 +332,11 @@ async function* createEventStream(
     yield { type: 'system', sessionId: result.sessionId };
   }
   if (result.response) {
+    // ZCode headless is one-shot: there are no streaming deltas, so emit the
+    // full response as a single `text` delta (renders into the card) as well
+    // as `final_text` (consumed by echo-style commands). Mirrors the upstream
+    // codex adapter's dual emission.
+    yield { type: 'text', delta: result.response };
     yield { type: 'final_text', content: result.response };
   }
   if (result.usage) {

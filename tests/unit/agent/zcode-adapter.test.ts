@@ -108,7 +108,7 @@ console.log(JSON.stringify({
     return events;
   }
 
-  it('emits system/final_text/usage/done from the JSON payload', async () => {
+  it('emits system/text/final_text/usage/done from the JSON payload', async () => {
     process.env.ARGV_CAPTURE = join(stateDir, 'argv.json');
     process.env.ZCODE_API_KEY = 'test-key';
     const adapter = makeAdapter();
@@ -116,10 +116,11 @@ console.log(JSON.stringify({
       adapter.run({ runId: 'r1', prompt: 'hello', cwd: stateDir }),
     );
     const types = events.map((e) => e.type);
-    expect(types).toEqual(['system', 'final_text', 'usage', 'done']);
+    expect(types).toEqual(['system', 'text', 'final_text', 'usage', 'done']);
     expect(events[0]).toMatchObject({ sessionId: 'sess_fresh' });
-    expect(events[1]).toMatchObject({ content: 'fake answer' });
-    expect(events[3]).toMatchObject({ terminationReason: 'normal', sessionId: 'sess_fresh' });
+    expect(events[1]).toMatchObject({ delta: 'fake answer' });
+    expect(events[2]).toMatchObject({ content: 'fake answer' });
+    expect(events[4]).toMatchObject({ terminationReason: 'normal', sessionId: 'sess_fresh' });
   });
 
   it('spawns with --json --mode yolo --cwd and redirects HOME to the isolated profile home', async () => {
